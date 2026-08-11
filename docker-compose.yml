@@ -113,3 +113,24 @@ services:
 
     ports:
       - "${HOST_PDFJS_PORT:-8080}:80"
+
+
+  index-builder:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OCR_DIR: /data/ocr
+      INDEX_DIR: /data/vector_index
+      BOOK_CATEGORY_PATH: /data/book/book_categories.json
+
+    volumes:
+      - ${HOST_OCR_DIR}:/data/ocr:ro
+      - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index
+      - ${HOST_BOOK_DIR}:/data/book:ro
+
+    command:
+      - python
+      - build_faiss_index.py
