@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 import json
+import re
 
 from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -270,6 +271,205 @@ def apply_category_weight(results):
         for doc, _ in boosted_results
     ]
 
+# ============================================================
+# 検索クエリ正規化
+# ============================================================
+
+def normalize_search_query(query: str) -> str:
+    """
+    ユーザーの自然文質問から、検索上不要な定型表現を除去する。
+
+    例:
+        魔力撃について教えて
+            -> 魔力撃
+
+        魔力撃について教えてください
+            -> 魔力撃
+
+        魔力撃とは？
+            -> 魔力撃
+
+        魔力撃を説明してください
+            -> 魔力撃
+
+    内容を表す語は可能な限り残し、
+    質問形式だけを除去する。
+    """
+
+    normalized = query.strip()
+
+    # 文末記号を除去
+    normalized = re.sub(
+        r"[。．.!！?？]+$",
+        "",
+        normalized,
+    ).strip()
+
+    # 質問・依頼として付加される定型表現を除去
+    suffix_patterns = [
+        r"について詳しく教えてください$",
+        r"について詳しく教えて$",
+        r"について教えてください$",
+        r"について教えて$",
+        r"を詳しく教えてください$",
+        r"を詳しく教えて$",
+        r"を教えてください$",
+        r"を教えて$",
+        r"について説明してください$",
+        r"について説明して$",
+        r"を説明してください$",
+        r"を説明して$",
+        r"とは何ですか$",
+        r"とは何$",
+        r"って何ですか$",
+        r"って何$",
+        r"とは$",
+    ]
+
+    for pattern in suffix_patterns:
+        normalized = re.sub(
+            pattern,
+            "",
+            normalized,
+        ).strip()
+
+    # 除去しすぎた場合は元の質問を使用
+    if not normalized:
+        return query.strip()
+
+    return normalized
+
+
+# ============================================================
+# ルール定義候補検索
+# ============================================================
+
+def definition_search(
+    query: str,
+    top_k: int,
+    books=None,
+):
+    """
+    《魔力撃》のようなルール項目そのものの定義ページを検索する。
+
+    単に語が登場するページではなく、
+
+        《項目名》
+        前提
+        適用
+        使用
+        リスク
+        概要
+        効果
+
+    などを含む「定義本文」を優先する。
+    """
+
+    term = normalize_search_query(
+        query
+    )
+
+    # 自然文の長い質問は「項目名」として扱わない。
+    # この場合は通常のHybrid Searchだけを使用する。
+    if (
+        not term
+        or len(term) > 30
+        or " " in term
+        or "　" in term
+    ):
+        return []
+
+    decorated_term = (
+        f"《{term}》"
+    )
+
+    definition_markers = (
+        "前提",
+        "適用",
+        "使用",
+        "リスク",
+        "概要",
+        "効果",
+    )
+
+    candidates = []
+
+    for doc in all_index_documents:
+
+        if (
+            books
+            and doc.metadata.get("book")
+            not in books
+        ):
+            continue
+
+        text = doc.page_content
+
+        # 項目名そのものが存在しなければ対象外
+        if term not in text:
+            continue
+
+        score = 0.0
+
+        # 《魔力撃》のような正式な項目表記を最優先
+        decorated_position = text.find(
+            decorated_term
+        )
+
+        if decorated_position >= 0:
+            score += 10.0
+
+            # チャンク冒頭近くに項目名があるほど
+            # 定義本文である可能性が高い
+            if decorated_position <= 100:
+                score += 3.0
+            elif decorated_position <= 250:
+                score += 2.0
+            elif decorated_position <= 500:
+                score += 1.0
+
+        # 定義欄に特徴的な語を加点
+        marker_count = sum(
+            1
+            for marker in definition_markers
+            if marker in text
+        )
+
+        score += (
+            marker_count * 0.75
+        )
+
+        # カテゴリは同程度の定義候補の
+        # タイブレークとしてのみ軽く使用する
+        category = get_document_category(
+            doc
+        )
+
+        score += (
+            category_weight.get(
+                category,
+                1.0,
+            )
+            * 0.1
+        )
+
+        candidates.append(
+            (
+                doc,
+                score,
+            )
+        )
+
+    candidates.sort(
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    return [
+        doc
+        for doc, _score
+        in candidates[:top_k]
+    ]
 
 # ============================================================
 # 日本語character n-gram検索
@@ -350,29 +550,40 @@ def hybrid_search(
     books=None,
 ):
     """
-    FAISSベクトル検索と
+    ルール定義検索、FAISSベクトル検索、
     character n-gram lexical検索を統合する。
 
-    スコアの尺度が異なるため、生スコアの加重平均ではなく
-    Reciprocal Rank Fusion (RRF) で順位を統合する。
-
-    category weightは検索関連性そのものには使用せず、
-    同程度の候補をわずかに優先する補正としてだけ使用する。
+    1. ルール項目の定義本文を優先的に確保
+    2. ベクトル検索とLexical検索をRRFで統合
+    3. 重複を除去してtop_k件を返す
     """
 
+    search_query = normalize_search_query(
+        query
+    )
+
     # --------------------------------------------------------
-    # ベクトル検索
+    # 1. ルール定義候補
+    # --------------------------------------------------------
+
+    definition_results = definition_search(
+        query=search_query,
+        top_k=min(3, top_k),
+        books=books,
+    )
+
+    # --------------------------------------------------------
+    # 2. ベクトル検索
     # --------------------------------------------------------
 
     vector_results = (
         db.similarity_search_with_score(
-            query,
+            search_query,
             k=candidate_k,
         )
     )
 
     vector_rank = {}
-
     rank = 0
 
     for doc, _distance in vector_results:
@@ -393,13 +604,12 @@ def hybrid_search(
             rank,
         )
 
-
     # --------------------------------------------------------
-    # Lexical検索
+    # 3. Lexical検索
     # --------------------------------------------------------
 
     lexical_results = lexical_search(
-        query=query,
+        query=search_query,
         top_k=candidate_k,
         books=books,
     )
@@ -421,9 +631,8 @@ def hybrid_search(
             rank,
         )
 
-
     # --------------------------------------------------------
-    # 候補統合
+    # 4. FAISS + Lexical のRRF
     # --------------------------------------------------------
 
     candidate_keys = (
@@ -434,33 +643,23 @@ def hybrid_search(
 
     scored_candidates = []
 
-    # RRFの標準的な安定化定数
     rrf_k = 60.0
 
-    # ベクトルとlexicalの比率。
-    # SW2.5では固有名詞一致が重要なのでlexicalをやや優先する。
     vector_weight = 0.40
     lexical_weight = 0.60
 
     for key in candidate_keys:
 
         if key in lexical_rank:
-
             doc = lexical_rank[
                 key
             ][0]
-
         else:
-
             doc = vector_rank[
                 key
             ][0]
 
         score = 0.0
-
-        # --------------------------------------------
-        # ベクトル順位
-        # --------------------------------------------
 
         if key in vector_rank:
 
@@ -477,10 +676,6 @@ def hybrid_search(
                 )
             )
 
-        # --------------------------------------------
-        # Lexical順位
-        # --------------------------------------------
-
         if key in lexical_rank:
 
             rank = lexical_rank[
@@ -496,18 +691,9 @@ def hybrid_search(
                 )
             )
 
-        # --------------------------------------------
-        # カテゴリ補正
-        #
-        # category weightを直接スコアへ足すと
-        # 検索内容よりカテゴリが支配してしまうため、
-        # 最大でも数%程度の乗算補正に留める。
-        # --------------------------------------------
-
-        category = (
-            get_document_category(
-                doc
-            )
+        # カテゴリは軽微な補正のみ
+        category = get_document_category(
+            doc
         )
 
         raw_category_weight = (
@@ -535,24 +721,60 @@ def hybrid_search(
             )
         )
 
-
-    # --------------------------------------------------------
-    # 最終順位
-    # --------------------------------------------------------
-
     scored_candidates.sort(
         key=lambda x: x[1],
         reverse=True,
     )
 
-    return [
-        doc
-        for doc, _score
-        in scored_candidates[
-            :top_k
-        ]
-    ]
+    # --------------------------------------------------------
+    # 5. 定義候補を先頭に置き、
+    #    Hybrid結果を後ろへ追加
+    # --------------------------------------------------------
 
+    selected_docs = []
+    seen_keys = set()
+
+    for doc in definition_results:
+
+        key = document_key(
+            doc
+        )
+
+        if key in seen_keys:
+            continue
+
+        seen_keys.add(
+            key
+        )
+
+        selected_docs.append(
+            doc
+        )
+
+        if len(selected_docs) >= top_k:
+            return selected_docs
+
+    for doc, _score in scored_candidates:
+
+        key = document_key(
+            doc
+        )
+
+        if key in seen_keys:
+            continue
+
+        seen_keys.add(
+            key
+        )
+
+        selected_docs.append(
+            doc
+        )
+
+        if len(selected_docs) >= top_k:
+            break
+
+    return selected_docs
 
 # ============================================================
 # メインエンドポイント
