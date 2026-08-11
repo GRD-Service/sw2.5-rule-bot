@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,6 +30,9 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 100
+
+EMBEDDING_BATCH_SIZE = 100
+EMBEDDING_BATCH_SLEEP = 4.0
 
 # ============================================================
 # book_categories.json の読み込み
@@ -345,8 +349,11 @@ def build_faiss_index(
     output_dir: Path,
 ) -> None:
     """
-    Document群からEmbeddingを作成し、
-    FAISSインデックスとして保存する。
+    Document群を一定数ずつEmbeddingし、
+    FAISSインデックスを段階的に構築する。
+
+    OpenAI Embeddings API のTPM制限を避けるため、
+    バッチ間に待機時間を設ける。
     """
 
     if not chunks:
@@ -361,13 +368,58 @@ def build_faiss_index(
 
     embeddings = OpenAIEmbeddings(
         model=EMBEDDING_MODEL,
-        chunk_size=100,
+        chunk_size=EMBEDDING_BATCH_SIZE,
+        max_retries=20,
     )
 
-    vectorstore = FAISS.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-    )
+    total = len(chunks)
+    vectorstore = None
+
+    for start in range(0, total, EMBEDDING_BATCH_SIZE):
+
+        end = min(
+            start + EMBEDDING_BATCH_SIZE,
+            total,
+        )
+
+        batch = chunks[start:end]
+
+        batch_no = (
+            start // EMBEDDING_BATCH_SIZE
+        ) + 1
+
+        total_batches = (
+            total + EMBEDDING_BATCH_SIZE - 1
+        ) // EMBEDDING_BATCH_SIZE
+
+        print(
+            f"Embedding batch "
+            f"{batch_no}/{total_batches} "
+            f"({start + 1}-{end}/{total})"
+        )
+
+        batch_store = FAISS.from_documents(
+            documents=batch,
+            embedding=embeddings,
+        )
+
+        if vectorstore is None:
+            vectorstore = batch_store
+        else:
+            vectorstore.merge_from(
+                batch_store
+            )
+
+        # 最終バッチ後は待機不要
+        if end < total:
+            time.sleep(
+                EMBEDDING_BATCH_SLEEP
+            )
+
+    if vectorstore is None:
+        raise RuntimeError(
+            "FAISSインデックスを生成できませんでした。"
+        )
 
     output_dir.mkdir(
         parents=True,
@@ -379,8 +431,10 @@ def build_faiss_index(
     )
 
     print()
-    print(f"FAISS index saved: {output_dir}")
-
+    print(
+        f"FAISS index saved: "
+        f"{output_dir}"
+    )
 
 # ============================================================
 # インデックス内容の簡易確認
