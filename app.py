@@ -276,13 +276,12 @@ def expand_search():
             st.session_state.history.append({
                 "question": st.session_state.get("current_question", ""),
                 "answer": result["answer"],
-                "sources": result["sources"],
+                "citations": result.get("citations", []),
+                "sources": result.get("sources", []),
                 "model_used": result.get("model_used"),
                 "token_usage": result.get("token_usage", {}),
                 "k_used": st.session_state.k_used,  # 使用されたk
-                "max_k": max_k,  # max_kも取得して表示
-                "citations": result.get("citations", []),
-                "sources": result.get("sources", [])
+                "max_k": max_k  # max_kも取得して表示
             })
         else:
             st.error("再質問に失敗しました。")

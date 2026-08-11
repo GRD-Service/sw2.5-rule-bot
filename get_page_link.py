@@ -185,13 +185,33 @@ def auto_image_link_answer_text(answer: str, book_name_map: dict = None) -> str:
 
 def render_streamlit_demo():
     import streamlit as st
-    book = st.selectbox("書籍を選択", list(BOOK_URLS.keys()))
-    page = st.number_input("ページ番号", min_value=1, step=1)
+
+    book = st.selectbox(
+        "書籍を選択",
+        list(BOOK_URLS.keys()),
+    )
+
+    page = st.number_input(
+        "ページ番号",
+        min_value=1,
+        step=1,
+    )
 
     if st.button("出典リンクを生成"):
-        link = get_page_link(book, page)
-        st.markdown(link, unsafe_allow_html=True)
+        pdf_link, image_link = get_page_link(
+            book,
+            page,
+        )
 
+        if pdf_link and image_link:
+            st.markdown(
+                f"[画像]({image_link}) / "
+                f"[PDF]({pdf_link})"
+            )
+        else:
+            st.warning(
+                "該当書籍のリンクを生成できませんでした。"
+            )
 
 if __name__ == "__main__":
     render_streamlit_demo()
