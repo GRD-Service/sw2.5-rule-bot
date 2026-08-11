@@ -75,18 +75,6 @@ PAGE_PATTERN = re.compile(
 )
 
 
-def get_image_signature(
-    image_path: Path,
-) -> dict:
-    stat = image_path.stat()
-
-    return {
-        "filename": image_path.name,
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-    }
-
-
 def load_json(
     path: Path,
 ):
@@ -131,12 +119,25 @@ def atomic_write_json(
     )
 
 
+def get_image_signature(
+    image_path: Path,
+) -> dict:
+    stat = image_path.stat()
+
+    return {
+        "filename": image_path.name,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
 def collect_page_images(
     book_dir: Path,
 ) -> list[tuple[int, Path]]:
     pages = []
 
     for image_path in book_dir.iterdir():
+
         if not image_path.is_file():
             continue
 
@@ -165,12 +166,145 @@ def collect_page_images(
     return pages
 
 
+def validate_page_sequence(
+    book_name: str,
+    pages: list[tuple[int, Path]],
+) -> None:
+
+    if not pages:
+        raise RuntimeError(
+            f"No JPEG pages found: {book_name}"
+        )
+
+    page_numbers = [
+        page_number
+        for page_number, _
+        in pages
+    ]
+
+    if len(page_numbers) != len(
+        set(page_numbers)
+    ):
+        raise RuntimeError(
+            f"Duplicate page numbers: {book_name}"
+        )
+
+    if page_numbers[0] != 1:
+        raise RuntimeError(
+            f"First page is not page 1: "
+            f"{book_name}: "
+            f"{page_numbers[0]}"
+        )
+
+    expected = list(
+        range(
+            1,
+            page_numbers[-1] + 1,
+        )
+    )
+
+    if page_numbers != expected:
+
+        missing = sorted(
+            set(expected)
+            - set(page_numbers)
+        )
+
+        raise RuntimeError(
+            f"Missing page images: "
+            f"{book_name}: "
+            f"{missing}"
+        )
+
+
+def final_json_is_complete(
+    output_file: Path,
+    book_name: str,
+    pages: list[tuple[int, Path]],
+) -> bool:
+    """
+    既存の完成済みOCR JSONが、
+    現在のJPEGページ構成と一致するか確認する。
+
+    一致していればGoogle Vision APIを一切呼ばず、
+    書籍全体をSKIPする。
+    """
+
+    if not output_file.exists():
+        return False
+
+    data = load_json(
+        output_file
+    )
+
+    if not isinstance(
+        data,
+        list,
+    ):
+        return False
+
+    if len(data) != len(pages):
+        return False
+
+    expected_pages = [
+        page_number
+        for page_number, _
+        in pages
+    ]
+
+    actual_pages = []
+
+    for entry in data:
+
+        if not isinstance(
+            entry,
+            dict,
+        ):
+            return False
+
+        if entry.get("book") != book_name:
+            return False
+
+        page = entry.get(
+            "page"
+        )
+
+        try:
+            page = int(
+                page
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+        if "text" not in entry:
+            return False
+
+        if not isinstance(
+            entry.get("text"),
+            str,
+        ):
+            return False
+
+        actual_pages.append(
+            page
+        )
+
+    if actual_pages != expected_pages:
+        return False
+
+    return True
+
+
 def work_file_is_current(
     work_file: Path,
     image_path: Path,
     page_number: int,
     book_name: str,
 ) -> bool:
+
     if not work_file.exists():
         return False
 
@@ -184,13 +318,19 @@ def work_file_is_current(
     ):
         return False
 
-    if data.get("book") != book_name:
+    if data.get(
+        "book"
+    ) != book_name:
         return False
 
-    if data.get("page") != page_number:
+    if data.get(
+        "page"
+    ) != page_number:
         return False
 
-    if data.get("image_signature") != get_image_signature(
+    if data.get(
+        "image_signature"
+    ) != get_image_signature(
         image_path
     ):
         return False
@@ -205,6 +345,7 @@ def perform_ocr(
     client: vision.ImageAnnotatorClient,
     image_path: Path,
 ) -> str:
+
     content = image_path.read_bytes()
 
     image = vision.Image(
@@ -221,6 +362,7 @@ def perform_ocr(
         1,
         MAX_RETRIES + 1,
     ):
+
         try:
             response = (
                 client.document_text_detection(
@@ -235,17 +377,23 @@ def perform_ocr(
                     response.error.message
                 )
 
-            return (
+            text = (
                 response
                 .full_text_annotation
                 .text
-                .strip()
+            )
+
+            return (
+                text.strip()
+                if text
+                else ""
             )
 
         except (
             GoogleAPICallError,
             RuntimeError,
         ) as exc:
+
             last_exception = exc
 
             if attempt >= MAX_RETRIES:
@@ -280,12 +428,14 @@ def process_page(
     image_path: Path,
     work_file: Path,
 ) -> bool:
+
     if work_file_is_current(
         work_file,
         image_path,
         page_number,
         book_name,
     ):
+
         print(
             f"  SKIP page {page_number}: "
             f"{image_path.name}"
@@ -320,6 +470,7 @@ def process_page(
     )
 
     if REQUEST_INTERVAL_SECONDS > 0:
+
         time.sleep(
             REQUEST_INTERVAL_SECONDS
         )
@@ -333,9 +484,11 @@ def build_final_json(
     work_dir: Path,
     output_file: Path,
 ) -> None:
+
     results = []
 
     for page_number, image_path in pages:
+
         work_file = (
             work_dir
             / f"P{page_number:05d}.json"
@@ -374,64 +527,11 @@ def build_final_json(
     )
 
 
-def validate_page_sequence(
-    book_name: str,
-    pages: list[tuple[int, Path]],
-) -> None:
-    if not pages:
-        raise RuntimeError(
-            f"No JPEG pages found: "
-            f"{book_name}"
-        )
-
-    page_numbers = [
-        page_number
-        for page_number, _
-        in pages
-    ]
-
-    duplicates = (
-        len(page_numbers)
-        != len(set(page_numbers))
-    )
-
-    if duplicates:
-        raise RuntimeError(
-            f"Duplicate page numbers: "
-            f"{book_name}"
-        )
-
-    expected = list(
-        range(
-            page_numbers[0],
-            page_numbers[-1] + 1,
-        )
-    )
-
-    if page_numbers != expected:
-        missing = sorted(
-            set(expected)
-            - set(page_numbers)
-        )
-
-        raise RuntimeError(
-            f"Missing page images: "
-            f"{book_name}: "
-            f"{missing}"
-        )
-
-    if page_numbers[0] != 1:
-        raise RuntimeError(
-            f"First page is not page 1: "
-            f"{book_name}: "
-            f"{page_numbers[0]}"
-        )
-
-
 def process_book(
     client: vision.ImageAnnotatorClient,
     book_dir: Path,
-) -> tuple[int, int]:
+) -> tuple[int, int, bool]:
+
     book_name = book_dir.name
 
     pages = collect_page_images(
@@ -441,16 +541,6 @@ def process_book(
     validate_page_sequence(
         book_name,
         pages,
-    )
-
-    work_dir = (
-        OCR_WORK_DIR
-        / book_name
-    )
-
-    work_dir.mkdir(
-        parents=True,
-        exist_ok=True,
     )
 
     output_file = (
@@ -472,10 +562,47 @@ def process_book(
         "=" * 70
     )
 
+    # --------------------------------------------------------
+    # 既存の完成済みOCR JSONが正常なら、
+    # Google Vision APIには一切アクセスしない。
+    # --------------------------------------------------------
+
+    if final_json_is_complete(
+        output_file,
+        book_name,
+        pages,
+    ):
+
+        print(
+            "  SKIP BOOK: "
+            "completed OCR JSON already exists"
+        )
+
+        print(
+            f"  output: {output_file}"
+        )
+
+        return (
+            0,
+            len(pages),
+            True,
+        )
+
+    work_dir = (
+        OCR_WORK_DIR
+        / book_name
+    )
+
+    work_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     processed = 0
     skipped = 0
 
     for page_number, image_path in pages:
+
         work_file = (
             work_dir
             / f"P{page_number:05d}.json"
@@ -509,13 +636,19 @@ def process_book(
         f"  output: {output_file}"
     )
 
-    return processed, skipped
+    return (
+        processed,
+        skipped,
+        False,
+    )
 
 
 def find_book_directories() -> list[Path]:
+
     books = []
 
     for path in IMAGE_DIR.iterdir():
+
         if not path.is_dir():
             continue
 
@@ -534,6 +667,7 @@ def find_book_directories() -> list[Path]:
 
 
 def main() -> int:
+
     print(
         "=" * 70
     )
@@ -545,15 +679,18 @@ def main() -> int:
     )
 
     print(
-        f"Image directory: {IMAGE_DIR}"
+        f"Image directory: "
+        f"{IMAGE_DIR}"
     )
 
     print(
-        f"OCR work directory: {OCR_WORK_DIR}"
+        f"OCR work directory: "
+        f"{OCR_WORK_DIR}"
     )
 
     print(
-        f"OCR output directory: {OCR_DIR}"
+        f"OCR output directory: "
+        f"{OCR_DIR}"
     )
 
     print(
@@ -571,9 +708,11 @@ def main() -> int:
     )
 
     if not IMAGE_DIR.exists():
+
         print(
             f"ERROR: image directory "
-            f"does not exist: {IMAGE_DIR}",
+            f"does not exist: "
+            f"{IMAGE_DIR}",
             file=sys.stderr,
         )
 
@@ -592,6 +731,7 @@ def main() -> int:
     books = find_book_directories()
 
     if not books:
+
         print(
             "ERROR: no book directories "
             "containing JPEG pages found",
@@ -601,24 +741,33 @@ def main() -> int:
         return 1
 
     print(
-        f"Books found: {len(books)}"
+        f"Books found: "
+        f"{len(books)}"
     )
 
+    # 認証確認も兼ねてクライアントを生成するが、
+    # 完成済み書籍についてはOCR APIは呼ばれない。
     client = (
         vision.ImageAnnotatorClient()
     )
 
     processed_pages = 0
     skipped_pages = 0
+    completed_books = 0
+    newly_built_books = 0
     failed_books = 0
 
     for book_dir in books:
+
         try:
-            processed, skipped = (
-                process_book(
-                    client,
-                    book_dir,
-                )
+
+            (
+                processed,
+                skipped,
+                already_complete,
+            ) = process_book(
+                client,
+                book_dir,
             )
 
             processed_pages += (
@@ -629,11 +778,18 @@ def main() -> int:
                 skipped
             )
 
+            if already_complete:
+                completed_books += 1
+            else:
+                newly_built_books += 1
+
         except Exception as exc:
+
             failed_books += 1
 
             print(
-                f"ERROR: {book_dir.name}: "
+                f"ERROR: "
+                f"{book_dir.name}: "
                 f"{exc}",
                 file=sys.stderr,
             )
@@ -650,17 +806,27 @@ def main() -> int:
     )
 
     print(
-        f"OCR pages:     "
+        f"OCR pages:        "
         f"{processed_pages}"
     )
 
     print(
-        f"Skipped pages: "
+        f"Skipped pages:    "
         f"{skipped_pages}"
     )
 
     print(
-        f"Failed books:  "
+        f"Existing books:   "
+        f"{completed_books}"
+    )
+
+    print(
+        f"New/updated books:"
+        f" {newly_built_books}"
+    )
+
+    print(
+        f"Failed books:     "
         f"{failed_books}"
     )
 
