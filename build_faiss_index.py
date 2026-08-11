@@ -361,6 +361,7 @@ def build_faiss_index(
 
     embeddings = OpenAIEmbeddings(
         model=EMBEDDING_MODEL,
+        chunk_size=100,
     )
 
     vectorstore = FAISS.from_documents(
@@ -400,6 +401,7 @@ def verify_index(
 
     embeddings = OpenAIEmbeddings(
         model=EMBEDDING_MODEL,
+        chunk_size=100,
     )
 
     vectorstore = FAISS.load_local(
