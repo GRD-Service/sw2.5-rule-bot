@@ -1,0 +1,28 @@
+# Secrets
+.env
+auth/
+*.json.key
+*.pem
+
+# Runtime / generated data
+ocr/
+vector_index/
+pdf/
+image/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Streamlit / local tooling
+.streamlit/secrets.toml
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,73 @@
+name: sw25-rule-bot
+
+x-python-service: &python-service
+  build:
+    context: .
+    dockerfile: docker/app/Dockerfile
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    OCR_DIR: /data/ocr
+    INDEX_DIR: /data/vector_index
+    BOOK_CATEGORY_PATH: /data/book/book_categories.json
+    PDF_DIR: /data/pdf
+    PDFJS_BASE_URL: ${PDFJS_BASE_URL:-http://localhost:8080/pdfjs/web/viewer.html}
+    IMAGE_BASE_URL: ${IMAGE_BASE_URL:-http://localhost:8080/image}
+  volumes:
+    - ${HOST_OCR_DIR}:/data/ocr:ro
+    - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index:ro
+    - ${HOST_BOOK_DIR}:/data/book:ro
+    - ${HOST_PDF_DIR}:/data/pdf:ro
+
+services:
+  api:
+    <<: *python-service
+    command: ["uvicorn", "qa_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  ui:
+    <<: *python-service
+    command: ["streamlit", "run", "app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+    environment:
+      OCR_DIR: /data/ocr
+      INDEX_DIR: /data/vector_index
+      BOOK_CATEGORY_PATH: /data/book/book_categories.json
+      PDF_DIR: /data/pdf
+      QA_API_URL: http://api:8000/ask
+      PDFJS_BASE_URL: ${PDFJS_BASE_URL:-http://localhost:8080/pdfjs/web/viewer.html}
+      IMAGE_BASE_URL: ${IMAGE_BASE_URL:-http://localhost:8080/image}
+    depends_on:
+      - api
+      - pdfjs
+    ports:
+      - "${UI_PORT:-8501}:8501"
+
+  discord:
+    <<: *python-service
+    command: ["python", "bot.py"]
+    environment:
+      OCR_DIR: /data/ocr
+      INDEX_DIR: /data/vector_index
+      BOOK_CATEGORY_PATH: /data/book/book_categories.json
+      PDF_DIR: /data/pdf
+      QA_API_URL: http://api:8000/ask
+      PDFJS_BASE_URL: ${PDFJS_BASE_URL:-http://localhost:8080/pdfjs/web/viewer.html}
+      IMAGE_BASE_URL: ${IMAGE_BASE_URL:-http://localhost:8080/image}
+    depends_on:
+      - api
+      - pdfjs
+
+  pdfjs:
+    build:
+      context: .
+      dockerfile: docker/pdfjs/Dockerfile
+      args:
+        PDFJS_VERSION: ${PDFJS_VERSION:-6.2.108}
+    restart: unless-stopped
+    volumes:
+      - ${HOST_PDF_DIR}:/srv/sw25/pdf:ro
+      - ${HOST_IMAGE_DIR}:/srv/sw25/image:ro
+    ports:
+      - "${PDFJS_PORT:-8080}:80"

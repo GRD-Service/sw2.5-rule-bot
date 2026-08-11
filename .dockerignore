@@ -1,0 +1,11 @@
+.git
+.env
+auth
+ocr
+vector_index
+pdf
+image
+__pycache__
+*.pyc
+.venv
+venv
