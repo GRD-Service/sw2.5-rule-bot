@@ -148,7 +148,7 @@ app = FastAPI()
 class QueryRequest(BaseModel):
     question: str
     books: Optional[List[str]] = None
-    model: Optional[str] = "gpt-4.1-nano"
+    model: Optional[str] = "gpt-5.4-nano"
     k: Optional[int] = 10
     mode: Optional[str] = "rules_strict"
 
@@ -793,7 +793,7 @@ def ask_question(
 
     model_name = (
         request.model
-        or "gpt-4.1-nano"
+        or "gpt-5.4-nano"
     )
 
     mode = (

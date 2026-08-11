@@ -40,9 +40,18 @@ st.sidebar.header("🔍 検索条件")
 
 # --- モデルごとの価格設定（1kトークンあたり） ---
 model_prices = {
-    "gpt-4.1-nano": {"input": 0.10, "output": 0.40},
-    "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
-    "gpt-4.1": {"input": 2.00, "output": 8.00}
+    "gpt-5.4-nano": {
+        "input": 0.20,
+        "output": 1.25,
+    },
+    "gpt-5.4-mini": {
+        "input": 0.75,
+        "output": 4.50,
+    },
+    "gpt-5.4": {
+        "input": 2.50,
+        "output": 15.00,
+    },
 }
 
 # --- トークン価格計算 ---
@@ -56,16 +65,16 @@ def calculate_price(model, token_usage):
 
 # モデル選択肢の内部値と表示用のラベルを対応させた辞書
 model_options = {
-    "gpt-4.1-nano": "GPT-4.1 Nano (通常)",
-    "gpt-4.1-mini": "GPT-4.1 Mini (高性能)",
-    "gpt-4.1": "GPT-4.1 (超高性能)",
+    "gpt-5.4-nano": "GPT-5.4 Nano (通常)",
+    "gpt-5.4-mini": "GPT-5.4 Mini (高性能)",
+    "gpt-5.4": "GPT-5.4 (最高性能)",
 }
 
 # 表示用のリストを作成（内部値を表示用にマッピング）
 display_model_options = list(model_options.values())
 
 # デフォルトで選択するモデルを設定
-default_model_display = model_options["gpt-4.1-nano"]
+default_model_display = model_options["gpt-5.4-nano"]
 
 # モデル選択
 selected_model_display = st.sidebar.selectbox("🧠 モデル選択", display_model_options, index=display_model_options.index(default_model_display))
@@ -138,7 +147,9 @@ with st.expander("操作説明 (クリックして開く)"):
     - 検索条件の、検索対象の書籍の選択は無効です。モデル選択は有効です。
 
     ## 注意点
-    - モデル選択は基本的には`GPT-4.1 Nano`を使用して下さい。うまく回答が出ない場合は上位のモデルを使用してください。ただし、上位モデルは単価が高いため、1回の推論に対するコストが高くなりますので、常識の範囲内でお使いください。
+    - モデル選択は基本的には`GPT-5.4 Nano`を使用して下さい。
+    - うまく回答が出ない場合は`GPT-5.4 Mini`、
+    - さらに高い精度が必要な場合は`GPT-5.4`を使用してください。
     - サムネイルや書籍名をクリックすると、該当ページの画像が見えます。PDFのリンクもありますが、書籍がかなり重いので、快適に使うのは難しいかも知れません。
     
     """)
