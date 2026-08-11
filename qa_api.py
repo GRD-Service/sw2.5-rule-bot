@@ -154,6 +154,7 @@ class QueryRequest(BaseModel):
 
 
 class Citation(BaseModel):
+    id: int
     book: str
     page: int
     category: Optional[str] = None
@@ -178,16 +179,18 @@ class QueryResponse(BaseModel):
 # ============================================================
 
 template = """
-以下のコンテキストに基づいて、正確に質問に答えてください。
+以下のコンテキストだけを根拠として、
+質問に正確に答えてください。
 
-出典を回答に含める場合の注意事項:
-- 回答文内で出典を記載する場合は、必ず、コンテキスト中に存在する書籍名とページ番号を参照して、`(書籍名 - p.ページ番号)`の形式で記載してください。
-- どの様な場合でも、完全に、`(書籍名 - p.ページ番号)`の形式である必要が有ります。例外は一切ありません。これ以外の形式で回答した場合は、不正解として扱われます。
-- `(書籍名 - p.1,p.2)`といった、一つの出典に複数のページをまとめて回答するのは禁止です。`(書籍名 - p.ページ番号1)、(書籍名 - p.ページ番号2)`と回答してください。
-- 書籍名やページ番号を勝手に想像して記載してはいけません。コンテキスト中に存在する書籍名は一字一句、完全に使用しなければなりません。
-- 出典を囲む記号は、半角括弧()で有る必要が有ります。それ以外の記号は一切認められません。
-- 出典は回答文の末尾にまとめず、内容に応じた自然な位置に挿入してください。末尾に列挙するのは、不正解として扱われます。
-- これは後続の処理で機械的にリンクを張るために必要なことで、上記条件を満たさない回答は一切行ってはいけません。不具合が発生するため絶対に禁止です。
+回答ルール:
+- コンテキストに存在しない情報を推測して補ってはいけません。
+- 根拠を示す場合は、対応するコンテキストの引用IDを `[C1]` の形式で記載してください。
+- 引用IDは必ずコンテキスト中に存在するものだけを使用してください。
+- `[C1]`、`[C2]` のような形式以外で出典を書いてはいけません。
+- 書籍名やページ番号を回答文中へ直接書く必要はありません。
+- 同じ内容について同じ引用IDを複数回使用して構いません。
+- 回答の内容に対応する自然な位置へ引用IDを挿入してください。
+- 十分な根拠がコンテキストにない場合は、その旨を明確に回答してください。
 
 コンテキスト:
 {context}
@@ -247,7 +250,9 @@ def get_document_category(doc):
 def build_citations(documents) -> List[Citation]:
     """
     Document metadata から重複のない構造化出典を生成する。
-    同一書籍・同一ページの複数chunkは1件にまとめる。
+
+    同一書籍・同一ページの複数chunkは1件にまとめ、
+    表示・LLM引用用の連番IDを付与する。
     """
 
     citations = []
@@ -265,7 +270,10 @@ def build_citations(documents) -> List[Citation]:
         except (TypeError, ValueError):
             continue
 
-        key = (book, page)
+        key = (
+            book,
+            page,
+        )
 
         if key in seen:
             continue
@@ -274,6 +282,7 @@ def build_citations(documents) -> List[Citation]:
 
         citations.append(
             Citation(
+                id=len(citations) + 1,
                 book=book,
                 page=page,
                 category=get_document_category(doc),
@@ -1027,20 +1036,66 @@ def ask_question(
             )
 
         # ----------------------------------------------------
+        # 構造化出典
+        # ----------------------------------------------------
+
+        citations = build_citations(
+            selected_docs
+        )
+
+        citation_id_map = {
+            (
+                citation.book,
+                citation.page,
+            ): citation.id
+            for citation in citations
+        }
+
+
+        # ----------------------------------------------------
         # LLMへ渡すコンテキスト
         # ----------------------------------------------------
 
-        context = "\n".join(
-            (
-                f"["
-                f"{doc.metadata.get('book', '不明')}"
-                f" - p."
-                f"{doc.metadata.get('page', '?')}"
-                f"]: "
-                f"{doc.page_content}"
+        context_parts = []
+
+        for doc in selected_docs:
+
+            book = doc.metadata.get(
+                "book",
+                "不明",
             )
-            for doc
-            in selected_docs
+
+            page = doc.metadata.get(
+                "page",
+                "?",
+            )
+
+            try:
+                page_key = int(page)
+            except (TypeError, ValueError):
+                page_key = page
+
+            citation_id = citation_id_map.get(
+                (
+                    book,
+                    page_key,
+                )
+            )
+
+            if citation_id is None:
+                continue
+
+            context_parts.append(
+                (
+                    f"[CITATION:C{citation_id}]\n"
+                    f"書籍: {book}\n"
+                    f"ページ: {page}\n"
+                    f"本文:\n{doc.page_content}"
+                )
+            )
+
+        context = "\n\n".join(
+            context_parts
         )
 
 
@@ -1060,13 +1115,6 @@ def ask_question(
             full_prompt
         )
 
-        # ----------------------------------------------------
-        # 構造化出典
-        # ----------------------------------------------------
-
-        citations = build_citations(
-            selected_docs
-        )
 
         # 旧クライアント互換
         sources = citations_to_legacy_sources(

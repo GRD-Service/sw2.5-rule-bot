@@ -3,11 +3,64 @@ import streamlit.components.v1 as components
 import requests
 import os
 import json
+import re
 from get_page_link import (
     get_citation_label,
     get_citation_links,
-    auto_image_link_answer_text,
 )
+
+def link_citation_markers(
+    answer: str,
+    citations: list,
+) -> str:
+    """
+    回答中の [C1] 形式の引用IDを、
+    構造化citationに基づくリンクへ変換する。
+    """
+
+    citation_map = {
+        citation.get("id"): citation
+        for citation in citations
+        if citation.get("id") is not None
+    }
+
+    def replacer(match):
+        citation_id = int(
+            match.group(1)
+        )
+
+        citation = citation_map.get(
+            citation_id
+        )
+
+        if not citation:
+            return match.group(0)
+
+        label = get_citation_label(
+            citation
+        )
+
+        pdf_link, image_link = (
+            get_citation_links(
+                citation
+            )
+        )
+
+        if image_link and pdf_link:
+            return (
+                f"（<a href='{image_link}' "
+                f"target='_blank'>{label}</a> "
+                f"[<a href='{pdf_link}' "
+                f"target='_blank'>PDF</a>]）"
+            )
+
+        return f"（{label}）"
+
+    return re.sub(
+        r"\[C(\d+)\]",
+        replacer,
+        answer,
+    )
 
 st.set_page_config(page_title="ソード・ワールド2.5 ルールAI bot", layout="wide")
 st.title("📚 ソード・ワールド2.5 ルールAI bot")
@@ -293,7 +346,7 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
     with st.chat_message("Q"):
         st.markdown(entry["question"])
     with st.chat_message("A"):
-        display_text = auto_image_link_answer_text(entry["answer"], book_name_map)
+        display_text = link_citation_markers(entry["answer"], entry.get("citations", []))
         if entry.get("model_used"):
             display_text += f"\n\n🔧 使用モデル: `{entry['model_used']}`"
         if entry.get("token_usage"):

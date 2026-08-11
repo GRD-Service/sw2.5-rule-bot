@@ -4,11 +4,11 @@ from discord import app_commands
 import requests
 import os
 from dotenv import load_dotenv
+import re
 import json
 from get_page_link import (
     get_citation_label,
     get_citation_links,
-    auto_link_answer_text,
 )
 
 load_dotenv()
@@ -35,6 +35,57 @@ for category, category_info in book_categories.items():
         display_name = book_entry.get("display_name", full_name)
         book_name_map[display_name] = full_name
         book_name_map[full_name] = full_name
+
+def link_citation_markers(
+    answer: str,
+    citations: list,
+) -> str:
+    """
+    回答中の [C1] 形式の引用IDを、
+    Discord Markdownリンクへ変換する。
+    """
+
+    citation_map = {
+        citation.get("id"): citation
+        for citation in citations
+        if citation.get("id") is not None
+    }
+
+    def replacer(match):
+        citation_id = int(
+            match.group(1)
+        )
+
+        citation = citation_map.get(
+            citation_id
+        )
+
+        if not citation:
+            return match.group(0)
+
+        label = get_citation_label(
+            citation
+        )
+
+        pdf_link, image_link = (
+            get_citation_links(
+                citation
+            )
+        )
+
+        if image_link and pdf_link:
+            return (
+                f"[{label}]({image_link}) "
+                f"[[PDF]]({pdf_link})"
+            )
+
+        return label
+
+    return re.sub(
+        r"\[C(\d+)\]",
+        replacer,
+        answer,
+    )
 
 class TRPGBot(commands.Bot):
     def __init__(self):
@@ -79,7 +130,10 @@ async def ask(interaction: discord.Interaction, question: str):
         model_used = result.get("model_used", "不明")
         token_usage = result.get("token_usage", {})
 
-        enriched_answer = auto_link_answer_text(answer, book_name_map)
+        enriched_answer = link_citation_markers(
+            answer,
+            citations,
+        )
 
         links = []
 
