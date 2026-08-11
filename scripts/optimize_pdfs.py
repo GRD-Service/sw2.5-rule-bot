@@ -268,7 +268,7 @@ def linearize_pdf(
     source: Path,
     destination: Path,
 ) -> None:
-    subprocess.run(
+    result = subprocess.run(
         [
             "qpdf",
             "--linearize",
@@ -276,8 +276,35 @@ def linearize_pdf(
             str(source),
             str(destination),
         ],
-        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
+
+    if result.stdout:
+        print(
+            result.stdout.rstrip()
+        )
+
+    # qpdf exit status:
+    #   0 = success
+    #   2 = error
+    #   3 = success with warnings
+    #
+    # Exit status 3 is accepted here because the generated
+    # PDF is subsequently checked by validate_pdf().
+    if result.returncode not in (0, 3):
+        raise RuntimeError(
+            "qpdf linearization failed "
+            f"with exit status "
+            f"{result.returncode}"
+        )
+
+    if result.returncode == 3:
+        print(
+            "  qpdf completed with warnings; "
+            "continuing to validation..."
+        )
 
 
 def validate_pdf(
