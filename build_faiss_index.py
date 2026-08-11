@@ -27,8 +27,8 @@ FAISS_INDEX_DIR = Path(
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 100
 
 # ============================================================
 # book_categories.json の読み込み
