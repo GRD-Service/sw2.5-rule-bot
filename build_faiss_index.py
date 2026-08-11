@@ -1,75 +1,548 @@
-import os
 import json
-from glob import glob
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from pathlib import Path
+
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
-from langchain.docstore.document import Document
-from dotenv import load_dotenv
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 
-load_dotenv()
 
-OCR_DIR = os.getenv("OCR_DIR", "./ocr")
-INDEX_DIR = os.getenv("INDEX_DIR", "./vector_index")
-CATEGORY_PATH = os.getenv("BOOK_CATEGORY_PATH", "./book/book_categories.json")
+# ============================================================
+# 設定
+# ============================================================
 
-os.makedirs(INDEX_DIR, exist_ok=True)
+# OCR済みJSONを格納しているディレクトリ
+OCR_DIR = Path("ocr_output")
 
-# カテゴリデータの読み込み
-try:
-    with open(CATEGORY_PATH, "r", encoding="utf-8") as f:
-        book_categories = json.load(f)
-except Exception as e:
-    print(f"⚠️ カテゴリファイルの読み込みに失敗しました: {e}")
-    book_categories = {}
+# 書籍カテゴリ定義
+BOOK_CATEGORIES_FILE = Path("book_categories.json")
 
-# 書籍名 → カテゴリのマッピングを構築
-book_to_category = {
-    book: category for category, books in book_categories.items() for book in books
-}
+# FAISSインデックスの保存先
+FAISS_INDEX_DIR = Path("faiss_index")
 
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=100,
-)
+# Embeddingモデル
+EMBEDDING_MODEL = "text-embedding-3-small"
 
-embedding = OpenAIEmbeddings()
-docs = []
+# チャンク設定
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
 
-for path in glob(os.path.join(OCR_DIR, "*.json")):
-    with open(path, "r", encoding="utf-8") as f:
-        try:
-            data = json.load(f)
-            if not isinstance(data, list):
-                print(f"⚠️ 無視されました（リスト形式でない）: {path}")
+
+# ============================================================
+# book_categories.json の読み込み
+# ============================================================
+
+def load_book_categories(path: Path) -> dict[str, str]:
+    """
+    book_categories.json を読み込み、
+    「書籍名 -> カテゴリ名」の辞書を作成する。
+
+    戻り値例:
+    {
+        "ソード・ワールド2.5 ルールブック1": "基本ルールブック",
+        "ソード・ワールド2.5 ルールブック2": "基本ルールブック",
+        ...
+    }
+    """
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"book_categories.json が見つかりません: {path}"
+        )
+
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    book_to_category: dict[str, str] = {}
+
+    # 想定形式:
+    #
+    # [
+    #   {
+    #     "category": "basic",
+    #     "name": "基本ルールブック",
+    #     "books": [
+    #       {
+    #         "name": "ソード・ワールド2.5 ルールブック1"
+    #       }
+    #     ]
+    #   }
+    # ]
+
+    for category_entry in data:
+        category_name = category_entry.get("name")
+
+        if not category_name:
+            print(
+                "WARNING: カテゴリ名(name)がないエントリを"
+                "スキップします:"
+            )
+            print(category_entry)
+            continue
+
+        books = category_entry.get("books", [])
+
+        for book_entry in books:
+            if isinstance(book_entry, str):
+                book_name = book_entry
+            elif isinstance(book_entry, dict):
+                book_name = book_entry.get("name")
+            else:
+                book_name = None
+
+            if not book_name:
+                print(
+                    f"WARNING: カテゴリ '{category_name}' 内に"
+                    "書籍名のないエントリがあります:"
+                )
+                print(book_entry)
                 continue
+
+            if book_name in book_to_category:
+                old_category = book_to_category[book_name]
+
+                print(
+                    "WARNING: 同じ書籍が複数カテゴリに登録されています:"
+                )
+                print(f"  book: {book_name}")
+                print(f"  old : {old_category}")
+                print(f"  new : {category_name}")
+
+            book_to_category[book_name] = category_name
+
+    return book_to_category
+
+
+# ============================================================
+# OCR JSON の読み込み
+# ============================================================
+
+def load_documents(
+    ocr_dir: Path,
+    book_to_category: dict[str, str],
+) -> list[Document]:
+    """
+    OCR_DIR 以下のJSONファイルを読み込み、
+    LangChain Document に変換する。
+
+    OCR JSON想定形式:
+
+    [
+        {
+            "book": "ソード・ワールド2.5 ルールブック1",
+            "page": 42,
+            "text": "..."
+        },
+        ...
+    ]
+
+    metadata:
+
+    {
+        "book": "...",
+        "page": 42,
+        "category": "基本ルールブック",
+        "source": "..."
+    }
+    """
+
+    if not ocr_dir.exists():
+        raise FileNotFoundError(
+            f"OCRディレクトリが見つかりません: {ocr_dir}"
+        )
+
+    documents: list[Document] = []
+
+    json_files = sorted(ocr_dir.rglob("*.json"))
+
+    if not json_files:
+        raise RuntimeError(
+            f"JSONファイルが見つかりません: {ocr_dir}"
+        )
+
+    print(f"OCR JSON files: {len(json_files)}")
+
+    unknown_books: set[str] = set()
+
+    for json_path in json_files:
+        print(f"Loading: {json_path}")
+
+        try:
+            with json_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
         except Exception as e:
-            print(f"⚠️ JSON読み込みエラー: {path} - {e}")
+            print(f"ERROR: JSON読み込み失敗: {json_path}")
+            print(f"  {e}")
             continue
 
-    for item in data:
-        if not isinstance(item, dict):
-            print(f"⚠️ 無視されました（辞書形式でない要素）: {item}")
+        if not isinstance(data, list):
+            print(
+                f"WARNING: JSONルートがlistではありません: "
+                f"{json_path}"
+            )
             continue
 
-        book = item.get("book")
-        page = item.get("page")
-        category = book_to_category.get(book, "不明")
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
 
-        meta = {
-            "book": book,
-            "page": page,
-            "category": category
-        }
+            book = entry.get("book")
+            page = entry.get("page")
+            text = entry.get("text")
 
-        chunks = text_splitter.split_text(item["text"])
-        for chunk in chunks:
-            docs.append(Document(page_content=chunk, metadata=meta))
+            if not book:
+                print(
+                    f"WARNING: book がありません: "
+                    f"{json_path}"
+                )
+                continue
 
-print(f"📄 チャンク総数: {len(docs)}")
+            if page is None:
+                print(
+                    f"WARNING: page がありません: "
+                    f"{json_path} / {book}"
+                )
+                continue
 
-db = FAISS.from_documents(docs, embedding)
-db.save_local(INDEX_DIR)
+            if not text:
+                continue
 
-print(f"✅ ベクトルインデックスを保存しました：{INDEX_DIR}")
+            text = str(text).strip()
 
+            if not text:
+                continue
+
+            category = book_to_category.get(book)
+
+            if category is None:
+                unknown_books.add(book)
+                category = "未分類"
+
+            metadata = {
+                "book": book,
+                "page": page,
+                "category": category,
+                "source": str(json_path),
+            }
+
+            documents.append(
+                Document(
+                    page_content=text,
+                    metadata=metadata,
+                )
+            )
+
+    print()
+    print(f"Loaded page documents: {len(documents)}")
+
+    if unknown_books:
+        print()
+        print("WARNING: book_categories.json にない書籍:")
+        for book in sorted(unknown_books):
+            print(f"  - {book}")
+
+    return documents
+
+
+# ============================================================
+# チャンク分割
+# ============================================================
+
+def split_documents(
+    documents: list[Document],
+) -> list[Document]:
+    """
+    ページ単位Documentをチャンク分割する。
+
+    metadata は LangChain の splitter によって
+    各チャンクへ引き継がれる。
+    """
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=[
+            "\n\n",
+            "\n",
+            "。",
+            "、",
+            " ",
+            "",
+        ],
+    )
+
+    chunks = splitter.split_documents(documents)
+
+    # 同一ページ内のチャンクを識別できるようにする
+    page_chunk_counter: dict[tuple, int] = {}
+
+    for chunk in chunks:
+        key = (
+            chunk.metadata.get("book"),
+            chunk.metadata.get("page"),
+        )
+
+        chunk_index = page_chunk_counter.get(key, 0)
+
+        chunk.metadata["chunk"] = chunk_index
+
+        page_chunk_counter[key] = chunk_index + 1
+
+    print(f"Generated chunks: {len(chunks)}")
+
+    return chunks
+
+
+# ============================================================
+# metadata 確認
+# ============================================================
+
+def print_metadata_summary(
+    documents: list[Document],
+) -> None:
+    """
+    インデックス作成前にカテゴリ・書籍別の件数を表示する。
+    """
+
+    category_counts: dict[str, int] = {}
+    book_counts: dict[str, int] = {}
+
+    for doc in documents:
+        category = doc.metadata.get(
+            "category",
+            "未分類",
+        )
+        book = doc.metadata.get(
+            "book",
+            "不明",
+        )
+
+        category_counts[category] = (
+            category_counts.get(category, 0) + 1
+        )
+
+        book_counts[book] = (
+            book_counts.get(book, 0) + 1
+        )
+
+    print()
+    print("=" * 60)
+    print("Category summary")
+    print("=" * 60)
+
+    for category, count in sorted(
+        category_counts.items()
+    ):
+        print(f"{category}: {count}")
+
+    print()
+    print("=" * 60)
+    print("Book summary")
+    print("=" * 60)
+
+    for book, count in sorted(
+        book_counts.items()
+    ):
+        print(f"{book}: {count}")
+
+    print()
+
+
+# ============================================================
+# FAISSインデックス作成
+# ============================================================
+
+def build_faiss_index(
+    chunks: list[Document],
+    output_dir: Path,
+) -> None:
+    """
+    Document群からEmbeddingを作成し、
+    FAISSインデックスとして保存する。
+    """
+
+    if not chunks:
+        raise RuntimeError(
+            "インデックス化するDocumentがありません。"
+        )
+
+    print()
+    print("=" * 60)
+    print("Creating embeddings / FAISS index")
+    print("=" * 60)
+
+    embeddings = OpenAIEmbeddings(
+        model=EMBEDDING_MODEL,
+    )
+
+    vectorstore = FAISS.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+    )
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    vectorstore.save_local(
+        str(output_dir)
+    )
+
+    print()
+    print(f"FAISS index saved: {output_dir}")
+
+
+# ============================================================
+# インデックス内容の簡易確認
+# ============================================================
+
+def verify_index(
+    output_dir: Path,
+) -> None:
+    """
+    保存したFAISSインデックスを再読み込みして、
+    metadata が保持されていることを簡易確認する。
+    """
+
+    print()
+    print("=" * 60)
+    print("Verifying FAISS index")
+    print("=" * 60)
+
+    embeddings = OpenAIEmbeddings(
+        model=EMBEDDING_MODEL,
+    )
+
+    vectorstore = FAISS.load_local(
+        str(output_dir),
+        embeddings,
+        allow_dangerous_deserialization=True,
+    )
+
+    docstore_dict = vectorstore.docstore._dict
+
+    print(
+        f"Documents in index: "
+        f"{len(docstore_dict)}"
+    )
+
+    # 最初の数件を表示
+    for i, doc in enumerate(
+        docstore_dict.values()
+    ):
+        print()
+        print(f"[sample {i + 1}]")
+        print(f"metadata: {doc.metadata}")
+
+        preview = (
+            doc.page_content
+            .replace("\n", " ")
+            [:120]
+        )
+
+        print(f"text: {preview}")
+
+        if i >= 4:
+            break
+
+
+# ============================================================
+# main
+# ============================================================
+
+def main() -> None:
+    print("=" * 60)
+    print("SW2.5 FAISS Index Builder")
+    print("=" * 60)
+    print()
+
+    # --------------------------------------------------------
+    # 1. 書籍 -> カテゴリ対応表
+    # --------------------------------------------------------
+
+    print("Loading book categories...")
+
+    book_to_category = load_book_categories(
+        BOOK_CATEGORIES_FILE
+    )
+
+    print(
+        f"Registered books: "
+        f"{len(book_to_category)}"
+    )
+
+    print()
+
+    # --------------------------------------------------------
+    # 2. OCR JSON読み込み
+    # --------------------------------------------------------
+
+    print("Loading OCR documents...")
+
+    page_documents = load_documents(
+        OCR_DIR,
+        book_to_category,
+    )
+
+    if not page_documents:
+        raise RuntimeError(
+            "OCR Documentを1件も読み込めませんでした。"
+        )
+
+    # --------------------------------------------------------
+    # 3. ページDocumentのmetadata確認
+    # --------------------------------------------------------
+
+    print_metadata_summary(
+        page_documents
+    )
+
+    # --------------------------------------------------------
+    # 4. チャンク分割
+    # --------------------------------------------------------
+
+    print("Splitting documents...")
+
+    chunks = split_documents(
+        page_documents
+    )
+
+    if not chunks:
+        raise RuntimeError(
+            "チャンクを生成できませんでした。"
+        )
+
+    # --------------------------------------------------------
+    # 5. チャンクmetadata確認
+    # --------------------------------------------------------
+
+    print_metadata_summary(
+        chunks
+    )
+
+    # --------------------------------------------------------
+    # 6. FAISS構築
+    # --------------------------------------------------------
+
+    build_faiss_index(
+        chunks,
+        FAISS_INDEX_DIR,
+    )
+
+    # --------------------------------------------------------
+    # 7. 保存結果確認
+    # --------------------------------------------------------
+
+    verify_index(
+        FAISS_INDEX_DIR
+    )
+
+    print()
+    print("=" * 60)
+    print("Done")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
