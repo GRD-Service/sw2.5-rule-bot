@@ -162,3 +162,43 @@ services:
     command:
       - python
       - /app/scripts/optimize_pdfs.py
+
+  ocr-builder:
+    build:
+      context: .
+      dockerfile: docker/ocr-builder/Dockerfile
+
+    profiles:
+      - tools
+
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-vision.json
+
+      OCR_IMAGE_DIR: /data/image
+      OCR_OUTPUT_DIR: /data/ocr
+      OCR_WORK_DIR: /data/ocr-work
+
+      GOOGLE_VISION_LANGUAGE_HINTS: "ja"
+
+      OCR_MAX_RETRIES: "5"
+      OCR_RETRY_BASE_SECONDS: "2"
+      OCR_REQUEST_INTERVAL_SECONDS: "0.1"
+      OCR_REQUEST_TIMEOUT_SECONDS: "180"
+
+    volumes:
+      # 元JPEGは絶対に変更しない
+      - ${HOST_IMAGE_DIR}:/data/image:ro
+
+      # 完成したOCR JSON
+      - ${HOST_OCR_DIR}:/data/ocr
+
+      # ページ単位の途中結果
+      - ${HOST_OCR_WORK_DIR}:/data/ocr-work
+
+      # Google Cloud認証情報
+      # Gitリポジトリには保存しない
+      - ${HOST_GOOGLE_CREDENTIALS}:/run/secrets/google-vision.json:ro
+
+    command:
+      - python
+      - /app/scripts/google_vision_ocr.py
