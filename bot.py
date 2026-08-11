@@ -59,10 +59,11 @@ async def on_ready():
 async def ask(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
 
+    # AI Botモード
     payload = {
         "question": question,
         "books": [],
-        "exact_search": False  # AIモードで検索しない
+        "mode": "rules_strict"
     }
 
     try:
@@ -138,10 +139,11 @@ async def ask(interaction: discord.Interaction, question: str):
 async def search(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
 
+    # 全文検索モード
     payload = {
         "question": question,
         "books": [],
-        "exact_search": True  # 全文検索を実行
+        "mode": "exact_search"
     }
 
     try:
