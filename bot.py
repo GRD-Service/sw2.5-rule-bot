@@ -36,22 +36,21 @@ class TRPGBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+        )
 
     async def setup_hook(self):
-        # スラッシュコマンドの同期を確認する
         print("✅ スラッシュコマンド同期を準備中...")
-        for guild in self.guilds:
-            await self.tree.sync(guild=guild)  # サーバーごとに同期を行う
-            print(f"✅ コマンド同期完了: {guild.name}")
-        print("✅ コマンド同期完了")
+        await self.tree.sync()
+        print("✅ スラッシュコマンド同期完了")
 
 bot = TRPGBot()
 
 @bot.event
 async def on_ready():
     print(f"✅ Bot準備完了: {bot.user}")
-    await bot.setup_hook()  # 必要なタイミングで同期を実行
 
 # AI Botモード (ask)
 @bot.tree.command(name="ask", description="TRPGルールをAI Botモードで質問する")
