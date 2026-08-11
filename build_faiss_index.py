@@ -26,7 +26,10 @@ FAISS_INDEX_DIR = Path(
     os.getenv("INDEX_DIR", "./vector_index")
 )
 
-EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "text-embedding-3-small",
+)
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 100

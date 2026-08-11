@@ -17,8 +17,21 @@ load_dotenv()
 
 # --- 定数・初期化 ---
 INDEX_DIR = os.getenv("INDEX_DIR", "./vector_index")
-embedding = OpenAIEmbeddings()
-db = FAISS.load_local(INDEX_DIR, embedding, allow_dangerous_deserialization=True)
+
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "text-embedding-3-small",
+)
+
+embedding = OpenAIEmbeddings(
+    model=EMBEDDING_MODEL,
+)
+
+db = FAISS.load_local(
+    INDEX_DIR,
+    embedding,
+    allow_dangerous_deserialization=True,
+)
 
 # --- カテゴリデータ読み込み ---
 with open(os.getenv("BOOK_CATEGORY_PATH", "book/book_categories.json"), "r", encoding="utf-8") as f:

@@ -15,6 +15,7 @@ x-python-service: &python-service
     PDF_DIR: /data/pdf
     PDFJS_BASE_URL: ${PDFJS_BASE_URL}
     IMAGE_BASE_URL: ${IMAGE_BASE_URL}
+    EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
 
   volumes:
     - ${HOST_OCR_DIR}:/data/ocr:ro
@@ -125,6 +126,7 @@ services:
       OCR_DIR: /data/ocr
       INDEX_DIR: /data/vector_index
       BOOK_CATEGORY_PATH: /data/book/book_categories.json
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
 
     volumes:
       - ${HOST_OCR_DIR}:/data/ocr:ro
