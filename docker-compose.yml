@@ -104,7 +104,7 @@ services:
       context: .
       dockerfile: docker/pdfjs/Dockerfile
       args:
-        PDFJS_VERSION: ${PDFJS_VERSION:-6.2.108}
+        PDFJS_VERSION: ${PDFJS_VERSION:-5.7.284}
 
     restart: unless-stopped
 

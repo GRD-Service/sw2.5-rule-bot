@@ -32,8 +32,15 @@ BOOK_URLS = {
     for book, pdf in book_to_filename.items()
 }
 
-PDFJS_BASE = os.getenv("PDFJS_BASE_URL", "http://sw-rule-www.grd-svc.com/pdfjs/web/viewer.html")
+PDFJS_BASE = os.getenv(
+    "PDFJS_BASE_URL",
+    "http://sw-rule-www.grd-svc.com/pdfjs/web/viewer.html",
+)
 
+PDFJS_QUERY_OPTIONS = (
+    "&disableAutoFetch=true"
+    "&disableStream=true"
+)
 
 def get_page_link(
     book: str,
@@ -74,6 +81,7 @@ def get_page_link(
     pdf_link = (
         f"{PDFJS_BASE}"
         f"?file={encoded_path}"
+        f"{PDFJS_QUERY_OPTIONS}"
         f"#page={page}"
     )
 
@@ -86,8 +94,12 @@ def get_page_and_image_links(book: str, page: int, book_urls: dict = None) -> tu
         return None, None
 
     encoded_path = urllib.parse.quote(path)
-    pdf_link = f"{PDFJS_BASE}?file={encoded_path}#page={page}"
-
+    pdf_link = (
+        f"{PDFJS_BASE}"
+        f"?file={encoded_path}"
+        f"{PDFJS_QUERY_OPTIONS}"
+        f"#page={page}"
+    )
     base_image_url = os.getenv("IMAGE_BASE_URL", "https://sw-rule-www.grd-svc.com/image")
     encoded_book = urllib.parse.quote(book, safe='')
     page_str = f"P{page:05d}"
