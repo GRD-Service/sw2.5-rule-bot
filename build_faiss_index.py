@@ -1,32 +1,34 @@
+import os
 import json
 from pathlib import Path
 
+from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
+load_dotenv()
 
-# ============================================================
-# 設定
-# ============================================================
+OCR_DIR = Path(
+    os.getenv("OCR_DIR", "./ocr")
+)
 
-# OCR済みJSONを格納しているディレクトリ
-OCR_DIR = Path("ocr_output")
+BOOK_CATEGORIES_FILE = Path(
+    os.getenv(
+        "BOOK_CATEGORY_PATH",
+        "./book/book_categories.json"
+    )
+)
 
-# 書籍カテゴリ定義
-BOOK_CATEGORIES_FILE = Path("book_categories.json")
+FAISS_INDEX_DIR = Path(
+    os.getenv("INDEX_DIR", "./vector_index")
+)
 
-# FAISSインデックスの保存先
-FAISS_INDEX_DIR = Path("faiss_index")
-
-# Embeddingモデル
 EMBEDDING_MODEL = "text-embedding-3-small"
 
-# チャンク設定
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
-
 
 # ============================================================
 # book_categories.json の読み込み
@@ -35,14 +37,7 @@ CHUNK_OVERLAP = 200
 def load_book_categories(path: Path) -> dict[str, str]:
     """
     book_categories.json を読み込み、
-    「書籍名 -> カテゴリ名」の辞書を作成する。
-
-    戻り値例:
-    {
-        "ソード・ワールド2.5 ルールブック1": "基本ルールブック",
-        "ソード・ワールド2.5 ルールブック2": "基本ルールブック",
-        ...
-    }
+    書籍名 -> カテゴリ名 の辞書を作成する。
     """
 
     if not path.exists():
@@ -53,65 +48,58 @@ def load_book_categories(path: Path) -> dict[str, str]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
+    if not isinstance(data, dict):
+        raise ValueError(
+            "book_categories.json のルートはdictである必要があります。"
+        )
+
     book_to_category: dict[str, str] = {}
 
-    # 想定形式:
-    #
-    # [
-    #   {
-    #     "category": "basic",
-    #     "name": "基本ルールブック",
-    #     "books": [
-    #       {
-    #         "name": "ソード・ワールド2.5 ルールブック1"
-    #       }
-    #     ]
-    #   }
-    # ]
+    for category_name, category_info in data.items():
 
-    for category_entry in data:
-        category_name = category_entry.get("name")
-
-        if not category_name:
+        if not isinstance(category_info, dict):
             print(
-                "WARNING: カテゴリ名(name)がないエントリを"
-                "スキップします:"
+                f"WARNING: カテゴリ情報がdictではありません: "
+                f"{category_name}"
             )
-            print(category_entry)
             continue
 
-        books = category_entry.get("books", [])
+        books = category_info.get("books", [])
+
+        if not isinstance(books, list):
+            print(
+                f"WARNING: books がlistではありません: "
+                f"{category_name}"
+            )
+            continue
 
         for book_entry in books:
-            if isinstance(book_entry, str):
-                book_name = book_entry
-            elif isinstance(book_entry, dict):
-                book_name = book_entry.get("name")
-            else:
-                book_name = None
+
+            if not isinstance(book_entry, dict):
+                print(
+                    f"WARNING: 書籍情報がdictではありません: "
+                    f"{category_name}: {book_entry}"
+                )
+                continue
+
+            book_name = book_entry.get("name")
 
             if not book_name:
                 print(
-                    f"WARNING: カテゴリ '{category_name}' 内に"
-                    "書籍名のないエントリがあります:"
+                    f"WARNING: name がありません: "
+                    f"{category_name}: {book_entry}"
                 )
-                print(book_entry)
                 continue
 
             if book_name in book_to_category:
-                old_category = book_to_category[book_name]
-
                 print(
-                    "WARNING: 同じ書籍が複数カテゴリに登録されています:"
+                    f"WARNING: 書籍が複数カテゴリにあります: "
+                    f"{book_name}"
                 )
-                print(f"  book: {book_name}")
-                print(f"  old : {old_category}")
-                print(f"  new : {category_name}")
 
             book_to_category[book_name] = category_name
 
     return book_to_category
-
 
 # ============================================================
 # OCR JSON の読み込み
