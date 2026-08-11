@@ -3,7 +3,11 @@ import streamlit.components.v1 as components
 import requests
 import os
 import json
-from get_page_link import get_page_link, get_page_and_image_links, auto_image_link_answer_text
+from get_page_link import (
+    get_citation_label,
+    get_citation_links,
+    auto_image_link_answer_text,
+)
 
 st.set_page_config(page_title="ソード・ワールド2.5 ルールAI bot", layout="wide")
 st.title("📚 ソード・ワールド2.5 ルールAI bot")
@@ -197,11 +201,34 @@ if st.session_state.get("question_submitted"):
                     st.session_state.history.append({
                         "question": question,
                         "answer": result["answer"],
-                        "sources": result["sources"],
-                        "model_used": result.get("model_used"),
-                        "token_usage": result.get("token_usage", {}),
-                        "k_used": result.get("k_used", 10),  # 使用されたkを記録
-                        "max_k": result.get("max_k", 50)  # max_kも取得して表示                    })
+
+                        # 新API
+                        "citations": result.get(
+                            "citations",
+                            [],
+                        ),
+
+                        # 旧API互換
+                        "sources": result.get(
+                            "sources",
+                            [],
+                        ),
+
+                        "model_used": result.get(
+                            "model_used"
+                        ),
+                        "token_usage": result.get(
+                            "token_usage",
+                            {},
+                        ),
+                        "k_used": result.get(
+                            "k_used",
+                            10,
+                        ),
+                        "max_k": result.get(
+                            "max_k",
+                            50,
+                        ),
                     })
 
                     # 検索結果が少ない場合、再検索ボタンを表示
@@ -253,7 +280,9 @@ def expand_search():
                 "model_used": result.get("model_used"),
                 "token_usage": result.get("token_usage", {}),
                 "k_used": st.session_state.k_used,  # 使用されたk
-                "max_k": max_k  # max_kも取得して表示
+                "max_k": max_k,  # max_kも取得して表示
+                "citations": result.get("citations", []),
+                "sources": result.get("sources", [])
             })
         else:
             st.error("再質問に失敗しました。")
@@ -292,34 +321,69 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
                 if st.session_state.search_button_visible:
                     st.button("事前検索範囲を広げて再質問", key=f"expand_search_{idx}", on_click=expand_search)
 
-        if entry["sources"]:
+        citations = entry.get(
+            "citations",
+            [],
+        )
+
+        if citations:
             st.markdown("**📖 出典:**")
-            for src in entry["sources"]:
+
+            for citation in citations:
                 try:
-                    if " - p." in src:
-                        main_part = src.split(" - p.")
-                        if len(main_part) == 2:
-                            raw_book, page = main_part
-                            raw_book = raw_book.strip()
-                            true_book = book_name_map.get(raw_book) or book_name_map.get(raw_book.split(" / ")[-1])
-                            if true_book:
-                                pdf_link, image_link = get_page_and_image_links(true_book, int(page.strip()))
-                                thumbnail_html = f'''<div style="margin-bottom:10px;">
-<a href="{image_link}" target="_blank" style="text-decoration:none;">
-  <img src="{image_link}" style="width:100px;border:1px solid #ccc;">
-  <div style="display:inline-block;margin-left:10px;vertical-align:middle;">{true_book} - p.{page.strip()}</div>
-</a>
-[<a href="{pdf_link}" target="_blank">PDF</a>]
-</div>'''
-                                st.markdown(thumbnail_html, unsafe_allow_html=True)
-                            else:
-                                st.markdown(f"- {src}")
-                        else:
-                            st.markdown(f"- {src}")
+                    label = get_citation_label(
+                        citation
+                    )
+
+                    pdf_link, image_link = (
+                        get_citation_links(
+                            citation
+                        )
+                    )
+
+                    if pdf_link and image_link:
+                        thumbnail_html = f"""
+        <div style="margin-bottom:10px;">
+        <a href="{image_link}"
+            target="_blank"
+            style="text-decoration:none;">
+            <img src="{image_link}"
+                style="width:100px;border:1px solid #ccc;">
+            <div style="
+                display:inline-block;
+                margin-left:10px;
+                vertical-align:middle;">
+            {label}
+            </div>
+        </a>
+        [<a href="{pdf_link}"
+            target="_blank">PDF</a>]
+        </div>
+        """
+
+                        st.markdown(
+                            thumbnail_html,
+                            unsafe_allow_html=True,
+                        )
+
                     else:
-                        st.markdown(f"- {src}")
-                except:
-                    st.markdown(f"- {src}")
+                        st.markdown(
+                            f"- {label}"
+                        )
+
+                except Exception:
+                    st.markdown(
+                        f"- {citation}"
+                    )
+
+        # 旧API互換
+        elif entry.get("sources"):
+            st.markdown("**📖 出典:**")
+
+            for src in entry["sources"]:
+                st.markdown(
+                    f"- {src}"
+                )
 
         st.markdown("---")
 

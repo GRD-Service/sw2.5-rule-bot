@@ -35,24 +35,49 @@ BOOK_URLS = {
 PDFJS_BASE = os.getenv("PDFJS_BASE_URL", "http://sw-rule-www.grd-svc.com/pdfjs/web/viewer.html")
 
 
-def get_page_link(book: str, page: int, book_urls: dict = None) -> str:
-    """指定された書籍とページからPDF.jsの出典リンクを生成"""
+def get_page_link(
+    book: str,
+    page: int,
+    book_urls: dict = None,
+) -> tuple[str | None, str | None]:
+    """
+    指定された書籍とページから
+    PDF.jsリンクと画像リンクを生成する。
+    """
+
     urls = book_urls or BOOK_URLS
     path = urls.get(book)
+
     if not path:
-        return f"{book} - p.{page}"
+        return None, None
+
     encoded_path = urllib.parse.quote(path)
-    
-    # 画像リンクを構成
-    base_image_url = os.getenv("IMAGE_BASE_URL", "https://sw-rule-www.grd-svc.com/image")
-    encoded_book = urllib.parse.quote(book, safe='')
+
+    base_image_url = os.getenv(
+        "IMAGE_BASE_URL",
+        "https://sw-rule-www.grd-svc.com/image",
+    )
+
+    encoded_book = urllib.parse.quote(
+        book,
+        safe="",
+    )
+
     page_str = f"P{page:05d}"
-    image_link = f"{base_image_url}/{encoded_book}/{page_str}.jpg"
 
-    # PDFリンクと画像リンクを返す
-    pdf_link = f"{PDFJS_BASE}?file={encoded_path}#page={page}"
+    image_link = (
+        f"{base_image_url}/"
+        f"{encoded_book}/"
+        f"{page_str}.jpg"
+    )
+
+    pdf_link = (
+        f"{PDFJS_BASE}"
+        f"?file={encoded_path}"
+        f"#page={page}"
+    )
+
     return pdf_link, image_link
-
 
 def get_page_and_image_links(book: str, page: int, book_urls: dict = None) -> tuple[str, str]:
     urls = book_urls or BOOK_URLS
@@ -70,6 +95,48 @@ def get_page_and_image_links(book: str, page: int, book_urls: dict = None) -> tu
 
     return pdf_link, image_link
 
+def get_citation_links(
+    citation: dict,
+) -> tuple[str | None, str | None]:
+    """
+    APIの構造化citationからリンクを生成する。
+    """
+
+    book = citation.get("book")
+    page = citation.get("page")
+
+    if not book or page is None:
+        return None, None
+
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        return None, None
+
+    return get_page_and_image_links(
+        book,
+        page,
+    )
+
+
+def get_citation_label(
+    citation: dict,
+) -> str:
+    """
+    構造化citationを表示用文字列へ変換する。
+    """
+
+    book = citation.get(
+        "book",
+        "不明",
+    )
+
+    page = citation.get(
+        "page",
+        "?",
+    )
+
+    return f"{book} - p.{page}"
 
 def auto_link_answer_text(answer: str, book_name_map: dict = None) -> str:
     """回答中の `(カテゴリ / 書籍名 - p.数字)` パターンをリンクに変換（括弧付き）"""

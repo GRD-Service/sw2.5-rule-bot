@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 import os
 import json
@@ -153,9 +153,20 @@ class QueryRequest(BaseModel):
     mode: Optional[str] = "rules_strict"
 
 
+class Citation(BaseModel):
+    book: str
+    page: int
+    category: Optional[str] = None
+
+
 class QueryResponse(BaseModel):
     answer: str
-    sources: List[str]
+    citations: List[Citation] = Field(default_factory=list)
+
+    # 旧クライアント互換用。
+    # app.py / bot.py の移行完了後も当面残す。
+    sources: List[str] = Field(default_factory=list)
+
     model_used: Optional[str] = None
     k_used: Optional[int] = None
     max_k: Optional[int] = None
@@ -233,6 +244,66 @@ def get_document_category(doc):
         ),
     )
 
+def build_citations(documents) -> List[Citation]:
+    """
+    Document metadata から重複のない構造化出典を生成する。
+    同一書籍・同一ページの複数chunkは1件にまとめる。
+    """
+
+    citations = []
+    seen = set()
+
+    for doc in documents:
+        book = doc.metadata.get("book")
+        page = doc.metadata.get("page")
+
+        if not book or page is None:
+            continue
+
+        try:
+            page = int(page)
+        except (TypeError, ValueError):
+            continue
+
+        key = (book, page)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        citations.append(
+            Citation(
+                book=book,
+                page=page,
+                category=get_document_category(doc),
+            )
+        )
+
+    return citations
+
+
+def citations_to_legacy_sources(
+    citations: List[Citation],
+) -> List[str]:
+    """
+    旧app.py / bot.pyとの互換性維持用。
+    """
+
+    sources = []
+
+    for citation in citations:
+        if citation.category:
+            sources.append(
+                f"{citation.category} / "
+                f"{citation.book} - p.{citation.page}"
+            )
+        else:
+            sources.append(
+                f"{citation.book} - p.{citation.page}"
+            )
+
+    return sources
 
 # ============================================================
 # カテゴリ重み付け
@@ -840,6 +911,7 @@ def ask_question(
 
         return QueryResponse(
             answer=response.content,
+            citations=[],
             sources=[],
             model_used=model_name,
             k_used=0,
@@ -853,7 +925,6 @@ def ask_question(
                 )
             ),
         )
-
 
     # ========================================================
     # exact_search
@@ -893,39 +964,13 @@ def ask_question(
         )
 
 
-        # 同一ページに複数chunkが存在する場合、
-        # Discord側へ同一ページを何度も返さないようにする。
-        sources = []
-        seen_sources = set()
+        citations = build_citations(
+            results
+        )
 
-        for doc in results:
-
-            book = doc.metadata.get(
-                "book",
-                "不明",
-            )
-
-            page = doc.metadata.get(
-                "page",
-                "?",
-            )
-
-            source_key = (
-                book,
-                page,
-            )
-
-            if source_key in seen_sources:
-                continue
-
-            seen_sources.add(
-                source_key
-            )
-
-            sources.append(
-                f"{book} - p.{page}"
-            )
-
+        sources = citations_to_legacy_sources(
+            citations
+        )
 
         if sources:
 
@@ -943,6 +988,7 @@ def ask_question(
 
         return QueryResponse(
             answer=answer,
+            citations=citations,
             sources=sources,
             model_used="AIは使用していません",
             k_used=0,
@@ -972,13 +1018,13 @@ def ask_question(
                     "該当する情報が"
                     "見つかりませんでした。"
                 ),
+                citations=[],
                 sources=[],
                 model_used=model_name,
                 k_used=0,
                 max_k=max_k,
                 token_usage={},
             )
-
 
         # ----------------------------------------------------
         # LLMへ渡すコンテキスト
@@ -1014,53 +1060,25 @@ def ask_question(
             full_prompt
         )
 
-
         # ----------------------------------------------------
-        # 出典一覧
+        # 構造化出典
         # ----------------------------------------------------
 
-        sources = []
+        citations = build_citations(
+            selected_docs
+        )
 
-        for doc in selected_docs:
-
-            book = doc.metadata.get(
-                "book",
-                "不明",
-            )
-
-            page = doc.metadata.get(
-                "page",
-                "?",
-            )
-
-            category = (
-                get_document_category(
-                    doc
-                )
-            )
-
-            src = (
-                f"{category}"
-                f" / "
-                f"{book}"
-                f" - p."
-                f"{page}"
-            )
-
-            if src not in sources:
-
-                sources.append(
-                    src
-                )
-
+        # 旧クライアント互換
+        sources = citations_to_legacy_sources(
+            citations
+        )
 
         return QueryResponse(
             answer=response.content,
+            citations=citations,
             sources=sources,
             model_used=model_name,
-            k_used=len(
-                selected_docs
-            ),
+            k_used=len(selected_docs),
             max_k=max_k,
             token_usage=(
                 response

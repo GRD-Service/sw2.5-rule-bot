@@ -5,7 +5,11 @@ import requests
 import os
 from dotenv import load_dotenv
 import json
-from get_page_link import get_page_link, auto_link_answer_text
+from get_page_link import (
+    get_citation_label,
+    get_citation_links,
+    auto_link_answer_text,
+)
 
 load_dotenv()
 
@@ -70,6 +74,7 @@ async def ask(interaction: discord.Interaction, question: str):
         result = response.json()
 
         answer = result.get("answer", "回答が見つかりませんでした。")
+        citations = result.get("citations", [])
         sources = result.get("sources", [])
         model_used = result.get("model_used", "不明")
         token_usage = result.get("token_usage", {})
@@ -77,18 +82,35 @@ async def ask(interaction: discord.Interaction, question: str):
         enriched_answer = auto_link_answer_text(answer, book_name_map)
 
         links = []
-        for src in sources:
-            if " - p." in src:
-                book, page_str = src.split(" - p.")
-                book = book.split(" / ")[-1].strip()
-                try:
-                    page = int(page_str)
-                    pdf_link, image_link = get_page_link(book, page)
-                    links.append(f"[{book} - p.{page}]({image_link}) [📄 PDFで開く]({pdf_link})")
-                except:
-                    links.append(src)
-            else:
-                links.append(src)
+
+        if citations:
+            for citation in citations:
+
+                label = get_citation_label(
+                    citation
+                )
+
+                pdf_link, image_link = (
+                    get_citation_links(
+                        citation
+                    )
+                )
+
+                if pdf_link and image_link:
+                    links.append(
+                        f"[{label}]({image_link}) "
+                        f"[📄 PDFで開く]({pdf_link})"
+                    )
+                else:
+                    links.append(
+                        label
+                    )
+
+        else:
+            # 旧API互換
+            links.extend(
+                sources
+            )
 
         reply_parts = []
         reply_parts.append(f"**❓ 質問:** {question}")
@@ -150,23 +172,41 @@ async def search(interaction: discord.Interaction, question: str):
         result = response.json()
 
         answer = result.get("answer", "全文検索結果が見つかりませんでした。")
+        citations = result.get("citations", [])
         sources = result.get("sources", [])
         model_used = result.get("model_used", "AIは使用していません")
         token_usage = result.get("token_usage", {})
 
         links = []
-        for src in sources:
-            if " - p." in src:
-                book, page_str = src.split(" - p.")
-                book = book.split(" / ")[-1].strip()
-                try:
-                    page = int(page_str)
-                    pdf_link, image_link = get_page_link(book, page)
-                    links.append(f"[{book} - p.{page}]({image_link}) [📄 PDFで開く]({pdf_link})")
-                except:
-                    links.append(src)
-            else:
-                links.append(src)
+
+        if citations:
+            for citation in citations:
+
+                label = get_citation_label(
+                    citation
+                )
+
+                pdf_link, image_link = (
+                    get_citation_links(
+                        citation
+                    )
+                )
+
+                if pdf_link and image_link:
+                    links.append(
+                        f"[{label}]({image_link}) "
+                        f"[📄 PDFで開く]({pdf_link})"
+                    )
+                else:
+                    links.append(
+                        label
+                    )
+
+        else:
+            # 旧API互換
+            links.extend(
+                sources
+            )
 
         reply_parts = []
         reply_parts.append(f"**🔍 検索結果:** {answer}")
