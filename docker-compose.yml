@@ -109,7 +109,7 @@ services:
     restart: unless-stopped
 
     volumes:
-      - ${HOST_PDF_DIR}:/srv/sw25/pdf:ro
+      - ${HOST_PDF_WEB_DIR}:/srv/sw25/pdf:ro
       - ${HOST_IMAGE_DIR}:/srv/sw25/image:ro
 
     ports:
@@ -120,6 +120,9 @@ services:
     build:
       context: .
       dockerfile: docker/app/Dockerfile
+
+    profiles:
+      - tools
 
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -136,3 +139,26 @@ services:
     command:
       - python
       - build_faiss_index.py
+
+  pdf-optimizer:
+    build:
+      context: .
+      dockerfile: docker/pdf-optimizer/Dockerfile
+
+    profiles:
+      - tools
+
+    volumes:
+      # 原本は絶対に書き込ませない
+      - ${HOST_PDF_DIR}:/data/pdf-original:ro
+
+      # PDF.js専用軽量PDF
+      - ${HOST_PDF_WEB_DIR}:/data/pdf-web
+
+    environment:
+      PDF_OPTIMIZER_WIDTH: "1400"
+      PDF_OPTIMIZER_JPEG_QUALITY: "68"
+
+    command:
+      - python
+      - /app/scripts/optimize_pdfs.py
