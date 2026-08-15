@@ -239,3 +239,42 @@ services:
     command:
       - python
       - /app/scripts/build_page_map.py
+
+  book-index-builder:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+
+    profiles:
+      - tools
+
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      OCR_DIR: /data/ocr
+      IMAGE_DIR: /data/image
+
+      PAGE_MAP_DIR: /data/metadata/page_maps
+      BOOK_INDEX_DIR: /data/metadata/indexes
+
+      INDEX_EXTRACT_MODEL: ${INDEX_EXTRACT_MODEL:-gpt-4.1-mini}
+
+      # 書籍後半40%だけを索引候補として走査
+      INDEX_SCAN_START_RATIO: "0.60"
+
+      # 索引見出しを発見した前後1ページも画像判定する
+      INDEX_PAGE_EXPAND: "1"
+
+    volumes:
+      - ${HOST_OCR_DIR}:/data/ocr:ro
+      - ${HOST_IMAGE_DIR}:/data/image:ro
+
+      # page_mapsは入力
+      - ${HOST_METADATA_DIR}/page_maps:/data/metadata/page_maps:ro
+
+      # indexesは生成先
+      - ${HOST_METADATA_DIR}/indexes:/data/metadata/indexes
+
+    command:
+      - python
+      - /app/scripts/extract_book_index.py
