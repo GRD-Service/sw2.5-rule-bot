@@ -240,7 +240,7 @@ services:
       - python
       - /app/scripts/build_page_map.py
 
-  book-index-builder:
+  book-navigation-builder:
     build:
       context: .
       dockerfile: docker/app/Dockerfile
@@ -255,26 +255,53 @@ services:
       IMAGE_DIR: /data/image
 
       PAGE_MAP_DIR: /data/metadata/page_maps
-      BOOK_INDEX_DIR: /data/metadata/indexes
 
-      INDEX_EXTRACT_MODEL: ${INDEX_EXTRACT_MODEL:-gpt-4.1-mini}
+      NAVIGATION_DIR: /data/metadata/navigation
+      NAVIGATION_WORK_DIR: /data/metadata/navigation_work
 
-      # 書籍後半40%だけを索引候補として走査
+      NAVIGATION_MODEL: ${NAVIGATION_MODEL:-gpt-4.1-mini}
+
+      # API耐障害性
+      NAVIGATION_REQUEST_TIMEOUT: "120"
+      NAVIGATION_MAX_RETRIES: "2"
+
+      # 通常ページで出力が巨大になったら、
+      # この制限に達した時点でtile fallbackへ移行
+      NAVIGATION_MAX_OUTPUT_TOKENS: "12000"
+
+      # 画像
+      NAVIGATION_IMAGE_MAX_SIDE: "2400"
+      NAVIGATION_JPEG_QUALITY: "88"
+
+      # length-limit fallback
+      NAVIGATION_TILE_ROWS: "2"
+      NAVIGATION_TILE_COLS: "2"
+      NAVIGATION_TILE_OVERLAP: "0.10"
+
+      # 目次
+      TOC_SCAN_END_RATIO: "0.30"
+      TOC_MAX_PAGES: "10"
+
+      # 索引
       INDEX_SCAN_START_RATIO: "0.60"
+      INDEX_MAX_PAGES: "12"
+      MAX_INDEX_HEADING_LENGTH: "30"
 
-      # 索引見出しを発見した前後1ページも画像判定する
-      INDEX_PAGE_EXPAND: "1"
+      # 1にすると完成済み・checkpointも無視して再生成
+      NAVIGATION_FORCE_REBUILD: "0"
 
     volumes:
       - ${HOST_OCR_DIR}:/data/ocr:ro
       - ${HOST_IMAGE_DIR}:/data/image:ro
 
-      # page_mapsは入力
       - ${HOST_METADATA_DIR}/page_maps:/data/metadata/page_maps:ro
 
-      # indexesは生成先
-      - ${HOST_METADATA_DIR}/indexes:/data/metadata/indexes
+      # 完成データ
+      - ${HOST_METADATA_DIR}/navigation:/data/metadata/navigation
+
+      # ページ・タイル単位checkpoint
+      - ${HOST_METADATA_DIR}/navigation_work:/data/metadata/navigation_work
 
     command:
       - python
-      - /app/scripts/extract_book_index.py
+      - /app/scripts/build_book_navigation.py
