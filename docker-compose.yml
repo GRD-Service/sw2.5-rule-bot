@@ -56,7 +56,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OCR_DIR: /data/ocr
       INDEX_DIR: /data/vector_index
-      BOOK_CATEGORY_PATH: /data/book/book_categories.json
+      BOOK_CATEGORY_PATH: /data/metadata/book_categories.json
       PDF_DIR: /data/pdf
 
       # Docker内部通信
@@ -87,7 +87,7 @@ services:
 
       OCR_DIR: /data/ocr
       INDEX_DIR: /data/vector_index
-      BOOK_CATEGORY_PATH: /data/book/book_categories.json
+      BOOK_CATEGORY_PATH: /data/metadata/book_categories.json
       PDF_DIR: /data/pdf
 
       # Docker内部通信

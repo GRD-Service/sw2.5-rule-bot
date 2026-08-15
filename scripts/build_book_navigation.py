@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 # Version
 # ============================================================
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CHECKPOINT_VERSION = 1
 
 
@@ -221,6 +221,30 @@ TOC_INDEX_PATTERN = re.compile(
 
 PURE_PAGE_NUMBER_PATTERN = re.compile(
     r"^\s*([0-9]{1,4})\s*$"
+)
+
+TOC_HEADING_PATTERNS = (
+    re.compile(r"目次", re.IGNORECASE),
+    re.compile(r"もくじ", re.IGNORECASE),
+    re.compile(r"contents?", re.IGNORECASE),
+)
+
+TOC_ENTRY_LIKE_PATTERN = re.compile(
+    r".{1,80}"
+    r"[\s.．…⋯・･\-―ー]+"
+    r"\d{1,4}\s*$"
+)
+
+TOC_SECTION_HINT_PATTERN = re.compile(
+    r"("
+    r"第[一二三四五六七八九十0-9]+部"
+    r"|第[一二三四五六七八九十0-9]+章"
+    r"|はじめに"
+    r"|序章"
+    r"|終章"
+    r"|chapter"
+    r")",
+    re.IGNORECASE,
 )
 
 
@@ -664,16 +688,19 @@ def is_toc_heading(
         line
     )
 
-    if value in {
-        "目次",
-        "もくじ",
-        "CONTENTS",
-        "Contents",
-        "contents",
-    }:
-        return True
+    if not value:
+        return False
 
-    return False
+    # 長すぎる本文中の「目次」言及を除外する。
+    if len(value) > 40:
+        return False
+
+    return any(
+        pattern.search(
+            value
+        )
+        for pattern in TOC_HEADING_PATTERNS
+    )
 
 
 def find_toc_seed_pages(
@@ -705,17 +732,30 @@ def find_toc_seed_pages(
         if pdf_page > scan_end:
             continue
 
+        text = page[
+            "text"
+        ]
+
         lines = [
             line
-            for line in page["text"].splitlines()
+            for line in text.splitlines()
             if line.strip()
         ]
 
-        if any(
+        heading_found = any(
             is_toc_heading(
                 line
             )
             for line in lines
+        )
+
+        toc_like = looks_like_toc_page(
+            text
+        )
+
+        if (
+            heading_found
+            or toc_like
         ):
             seeds.append(
                 pdf_page
@@ -726,6 +766,45 @@ def find_toc_seed_pages(
             seeds
         )
     )
+
+def looks_like_toc_page(
+    text: str,
+) -> bool:
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return False
+
+    numbered_entries = 0
+    section_hints = 0
+
+    for line in lines:
+        if TOC_ENTRY_LIKE_PATTERN.fullmatch(
+            line
+        ):
+            numbered_entries += 1
+
+        if TOC_SECTION_HINT_PATTERN.search(
+            line
+        ):
+            section_hints += 1
+
+    # 通常の目次
+    if numbered_entries >= 5:
+        return True
+
+    # OCRで「……」などが壊れた場合のfallback
+    if (
+        numbered_entries >= 2
+        and section_hints >= 2
+    ):
+        return True
+
+    return False
 
 
 # ============================================================
