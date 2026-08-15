@@ -213,7 +213,6 @@ services:
 
     environment:
       OCR_DIR: /data/ocr
-<<<<<<< HEAD
 
       PAGE_MAP_DIR: /data/metadata/page_maps
       PAGE_OVERRIDE_DIR: /data/metadata/page_overrides
@@ -237,20 +236,6 @@ services:
 
       # 自動判定できない書籍だけ手動指定
       - ${HOST_METADATA_DIR}/page_overrides:/data/metadata/page_overrides:ro
-=======
-      PAGE_ANCHOR_DIR: /data/metadata/page_anchors
-      PAGE_MAP_DIR: /data/metadata/page_maps
-
-    volumes:
-      # 既存OCRは絶対に変更しない
-      - ${HOST_OCR_DIR}:/data/ocr:ro
-
-      # アンカー定義は人間が管理する入力
-      - ${HOST_METADATA_DIR}/page_anchors:/data/metadata/page_anchors:ro
-
-      # 生成したページ対応表
-      - ${HOST_METADATA_DIR}/page_maps:/data/metadata/page_maps
->>>>>>> 63c3df41681b8e05332da7bc38131e0106458a25
 
     command:
       - python
