@@ -137,6 +137,8 @@ services:
       METADATA_DIR: /data/metadata
       BOOK_CATEGORY_PATH: /data/metadata/book_categories.json
 
+      PAGE_MAP_DIR: /data/metadata/page_maps
+
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
 
     volumes:
