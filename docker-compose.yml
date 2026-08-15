@@ -11,7 +11,10 @@ x-python-service: &python-service
     OPENAI_API_KEY: ${OPENAI_API_KEY}
     OCR_DIR: /data/ocr
     INDEX_DIR: /data/vector_index
-    BOOK_CATEGORY_PATH: /data/book/book_categories.json
+
+    METADATA_DIR: /data/metadata
+    BOOK_CATEGORY_PATH: /data/metadata/book_categories.json
+
     PDF_DIR: /data/pdf
     PDFJS_BASE_URL: ${PDFJS_BASE_URL}
     IMAGE_BASE_URL: ${IMAGE_BASE_URL}
@@ -20,7 +23,7 @@ x-python-service: &python-service
   volumes:
     - ${HOST_OCR_DIR}:/data/ocr:ro
     - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index:ro
-    - ${HOST_METADATA_DIR}:/data/book:ro
+    - ${HOST_METADATA_DIR}:/data/metadata:ro
     - ${HOST_PDF_DIR}:/data/pdf:ro
 
 
@@ -128,13 +131,16 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OCR_DIR: /data/ocr
       INDEX_DIR: /data/vector_index
-      BOOK_CATEGORY_PATH: /data/book/book_categories.json
+
+      METADATA_DIR: /data/metadata
+      BOOK_CATEGORY_PATH: /data/metadata/book_categories.json
+
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
 
     volumes:
       - ${HOST_OCR_DIR}:/data/ocr:ro
       - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index
-      - ${HOST_METADATA_DIR}:/data/book:ro
+      - ${HOST_METADATA_DIR}:/data/metadata:ro
 
     command:
       - python
@@ -219,23 +225,16 @@ services:
 
       PAGE_MAP_TAIL_LINES: "10"
       PAGE_MAP_MAX_LOGICAL_PAGE: "1000"
-
       PAGE_MAP_MIN_MATCH_COUNT: "10"
-
       PAGE_MAP_HIGH_CONFIDENCE_RATIO: "0.70"
       PAGE_MAP_MEDIUM_CONFIDENCE_RATIO: "0.40"
-
       PAGE_MAP_MIN_WINNER_MARGIN: "3.0"
 
     volumes:
-      # OCRは読み取り専用
       - ${HOST_OCR_DIR}:/data/ocr:ro
 
-      # 自動生成page map
-      - ${HOST_METADATA_DIR}/page_maps:/data/metadata/page_maps
-
-      # 自動判定できない書籍だけ手動指定
-      - ${HOST_METADATA_DIR}/page_overrides:/data/metadata/page_overrides:ro
+      # page-map-builderだけmetadataへ書き込み可能
+      - ${HOST_METADATA_DIR}:/data/metadata
 
     command:
       - python
