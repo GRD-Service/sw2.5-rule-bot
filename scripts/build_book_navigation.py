@@ -9,6 +9,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from difflib import SequenceMatcher
 
 from PIL import Image, ImageOps
 from langchain_openai import ChatOpenAI
@@ -19,12 +20,9 @@ from pydantic import BaseModel, Field
 # Version
 # ============================================================
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
-# TOCの探索方式を変更したため更新。
 TOC_CHECKPOINT_VERSION = 3
-
-# INDEXはタイル処理方式を変更したため更新。
 INDEX_CHECKPOINT_VERSION = 2
 
 
@@ -2697,11 +2695,23 @@ def build_final_toc(
                     logical_page = int(
                         logical_page
                     )
+
                 except (
                     TypeError,
                     ValueError,
                 ):
                     logical_page = None
+
+
+            # ========================================================
+            # navigation用途ではページ番号がない目次項目は使わない。
+            #
+            # ページヘッダー等をLLMが目次項目として拾ったケースも
+            # ここで除外される。
+            # ========================================================
+
+            if logical_page is None:
+                continue
 
             try:
                 level = int(
@@ -2794,16 +2804,7 @@ def build_final_toc(
         key=lambda item: (
             item[
                 "logical_page"
-            ] is None,
-            (
-                item[
-                    "logical_page"
-                ]
-                if item[
-                    "logical_page"
-                ] is not None
-                else 999999
-            ),
+            ],
             item[
                 "level"
             ],
@@ -2820,6 +2821,10 @@ def build_final_toc(
 def build_final_index(
     page_results: dict[int, dict],
     logical_to_pdf: dict[int, int],
+    index_types_by_pdf: dict[
+        int,
+        list[str],
+    ],
 ) -> list[dict]:
     merged = {}
 
@@ -2837,19 +2842,34 @@ def build_final_index(
         ):
             continue
 
+        expected_types = (
+            index_types_by_pdf.get(
+                source_pdf_page,
+                [],
+            )
+        )
+
         for section in extraction.get(
             "sections",
             [],
         ):
-            index_type = (
-                normalize_index_type(
-                    str(
-                        section.get(
-                            "index_type",
-                            "索引",
-                        )
-                    )
+            detected_type = str(
+                section.get(
+                    "index_type",
+                    "索引",
                 )
+            )
+
+            (
+                index_type,
+                candidate_index_types,
+            ) = correct_index_type_from_toc(
+                detected_type=(
+                    detected_type
+                ),
+                expected_types=(
+                    expected_types
+                ),
             )
 
             for entry in section.get(
@@ -2876,6 +2896,7 @@ def build_final_index(
                         page = int(
                             page
                         )
+
                     except (
                         TypeError,
                         ValueError,
@@ -2908,15 +2929,23 @@ def build_final_index(
                         key
                     ] = {
                         "term": term,
+
                         "index_type": (
                             index_type
                         ),
+
+                        "candidate_index_types": (
+                            set()
+                        ),
+
                         "logical_pages": (
                             set()
                         ),
+
                         "pdf_pages": (
                             set()
                         ),
+
                         "source_index_pages": (
                             set()
                         ),
@@ -2925,6 +2954,12 @@ def build_final_index(
                 target = merged[
                     key
                 ]
+
+                target[
+                    "candidate_index_types"
+                ].update(
+                    candidate_index_types
+                )
 
                 target[
                     "logical_pages"
@@ -2957,32 +2992,52 @@ def build_final_index(
     result = []
 
     for item in merged.values():
+        output = {
+            "term": (
+                item[
+                    "term"
+                ]
+            ),
+
+            "index_type": (
+                item[
+                    "index_type"
+                ]
+            ),
+
+            "logical_pages": sorted(
+                item[
+                    "logical_pages"
+                ]
+            ),
+
+            "pdf_pages": sorted(
+                item[
+                    "pdf_pages"
+                ]
+            ),
+
+            "source_index_pages": sorted(
+                item[
+                    "source_index_pages"
+                ]
+            ),
+        }
+
+        candidate_types = sorted(
+            item[
+                "candidate_index_types"
+            ]
+        )
+
+        # 確定できなかった場合だけ出力する。
+        if candidate_types:
+            output[
+                "candidate_index_types"
+            ] = candidate_types
+
         result.append(
-            {
-                "term": (
-                    item["term"]
-                ),
-                "index_type": (
-                    item[
-                        "index_type"
-                    ]
-                ),
-                "logical_pages": sorted(
-                    item[
-                        "logical_pages"
-                    ]
-                ),
-                "pdf_pages": sorted(
-                    item[
-                        "pdf_pages"
-                    ]
-                ),
-                "source_index_pages": sorted(
-                    item[
-                        "source_index_pages"
-                    ]
-                ),
-            }
+            output
         )
 
     result.sort(
@@ -2991,12 +3046,229 @@ def build_final_index(
                 "index_type"
             ],
             normalize_term_key(
-                item["term"]
+                item[
+                    "term"
+                ]
             ),
         )
     )
 
     return result
+
+
+# ============================================================
+# build_index_types_by_pdf
+# ============================================================
+
+def build_index_types_by_pdf(
+    toc_entries: list[dict],
+) -> dict[int, list[str]]:
+    """
+    目次から、
+
+        PDF 162 -> ["索引", "一般索引"]
+        PDF 163 -> [
+            "戦闘特技索引",
+            "魔法索引",
+            "練技・呪歌/終律・騎芸・賦術索引",
+        ]
+
+    のような対応表を作る。
+
+    単独の総称「索引」と、より具体的な分類が
+    同一ページに存在する場合は具体的分類を優先する。
+    """
+
+    mapping: dict[int, list[str]] = defaultdict(
+        list
+    )
+
+    for entry in toc_entries:
+        title = normalize_heading(
+            str(
+                entry.get(
+                    "title",
+                    "",
+                )
+            )
+        )
+
+        if not title.endswith(
+            "索引"
+        ):
+            continue
+
+        pdf_page = entry.get(
+            "pdf_page"
+        )
+
+        if pdf_page is None:
+            continue
+
+        try:
+            pdf_page = int(
+                pdf_page
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        if title not in mapping[
+            pdf_page
+        ]:
+            mapping[
+                pdf_page
+            ].append(
+                title
+            )
+
+    result = {}
+
+    for pdf_page, values in (
+        mapping.items()
+    ):
+        specific = [
+            value
+            for value in values
+            if value != "索引"
+        ]
+
+        # 「索引」と「一般索引」が同じページにあるなら、
+        # 「索引」は総称とみなして落とす。
+        if specific:
+            result[
+                pdf_page
+            ] = specific
+
+        else:
+            result[
+                pdf_page
+            ] = values
+
+    return result
+
+
+# ============================================================
+# correct_index_type_from_toc
+# ============================================================
+
+def correct_index_type_from_toc(
+    detected_type: str,
+    expected_types: list[str],
+) -> tuple[
+    str,
+    list[str],
+]:
+    """
+    LLMが返したindex_typeを、
+    目次に記載された分類名を使って補正する。
+
+    戻り値:
+        (
+            corrected_type,
+            candidate_index_types,
+        )
+
+    candidate_index_typesは、
+    一意に決められなかった場合だけ使用する。
+    """
+
+    detected = normalize_index_type(
+        detected_type
+    )
+
+    expected_types = list(
+        dict.fromkeys(
+            normalize_heading(
+                value
+            )
+            for value in expected_types
+            if value
+        )
+    )
+
+    if not expected_types:
+        return (
+            detected,
+            [],
+        )
+
+    # --------------------------------------------------------
+    # このPDFページに索引分類が1種類しかない。
+    #
+    # LLMの分類結果より目次を正とする。
+    # --------------------------------------------------------
+
+    if len(
+        expected_types
+    ) == 1:
+        return (
+            expected_types[0],
+            [],
+        )
+
+    # --------------------------------------------------------
+    # 完全一致
+    # --------------------------------------------------------
+
+    if detected in expected_types:
+        return (
+            detected,
+            [],
+        )
+
+    # --------------------------------------------------------
+    # 「索引」だけでは複数候補から決められない。
+    # --------------------------------------------------------
+
+    if detected == "索引":
+        return (
+            "索引",
+            expected_types,
+        )
+
+    # --------------------------------------------------------
+    # fuzzy match
+    #
+    # 例:
+    #   闘特技索引
+    #      ↓
+    #   戦闘特技索引
+    # --------------------------------------------------------
+
+    best_type = None
+    best_score = 0.0
+
+    for expected in expected_types:
+        score = SequenceMatcher(
+            None,
+            detected,
+            expected,
+        ).ratio()
+
+        if score > best_score:
+            best_score = score
+            best_type = expected
+
+    # 分類名は比較的短いため、
+    # 0.55程度ならOCRの1～数文字欠落を吸収できる。
+    if (
+        best_type is not None
+        and best_score >= 0.55
+    ):
+        return (
+            best_type,
+            [],
+        )
+
+    # 無理に分類しない。
+    return (
+        detected,
+        expected_types,
+    )
 
 
 # ============================================================
@@ -3353,6 +3625,12 @@ def process_book(
         ),
     )
 
+    index_types_by_pdf = (
+        build_index_types_by_pdf(
+            toc
+        )
+    )
+
     # ========================================================
     # INDEX
     # ========================================================
@@ -3421,6 +3699,9 @@ def process_book(
             ),
             logical_to_pdf=(
                 logical_to_pdf
+            ),
+            index_types_by_pdf=(
+                index_types_by_pdf
             ),
         )
     )
@@ -3553,6 +3834,18 @@ def process_book(
             "detected_pages": (
                 detected_index_pages
             ),
+
+            "types_by_pdf": {
+                str(
+                    pdf_page
+                ): index_types
+                for (
+                    pdf_page,
+                    index_types
+                ) in sorted(
+                    index_types_by_pdf.items()
+                )
+            },
         },
 
         "toc_entry_count": len(
