@@ -20,7 +20,7 @@ x-python-service: &python-service
   volumes:
     - ${HOST_OCR_DIR}:/data/ocr:ro
     - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index:ro
-    - ${HOST_BOOK_DIR}:/data/book:ro
+    - ${HOST_METADATA_DIR}:/data/book:ro
     - ${HOST_PDF_DIR}:/data/pdf:ro
 
 
@@ -134,7 +134,7 @@ services:
     volumes:
       - ${HOST_OCR_DIR}:/data/ocr:ro
       - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index
-      - ${HOST_BOOK_DIR}:/data/book:ro
+      - ${HOST_METADATA_DIR}:/data/book:ro
 
     command:
       - python
@@ -202,3 +202,30 @@ services:
     command:
       - python
       - /app/scripts/google_vision_ocr.py
+
+  page-map-builder:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+
+    profiles:
+      - tools
+
+    environment:
+      OCR_DIR: /data/ocr
+      PAGE_ANCHOR_DIR: /data/metadata/page_anchors
+      PAGE_MAP_DIR: /data/metadata/page_maps
+
+    volumes:
+      # 既存OCRは絶対に変更しない
+      - ${HOST_OCR_DIR}:/data/ocr:ro
+
+      # アンカー定義は人間が管理する入力
+      - ${HOST_METADATA_DIR}/page_anchors:/data/metadata/page_anchors:ro
+
+      # 生成したページ対応表
+      - ${HOST_METADATA_DIR}/page_maps:/data/metadata/page_maps
+
+    command:
+      - python
+      - /app/scripts/build_page_map.py

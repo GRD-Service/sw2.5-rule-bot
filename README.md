@@ -28,7 +28,7 @@ cp .env.example .env
 ```text
 HOST_OCR_DIR          OCR JSONディレクトリ
 HOST_VECTOR_INDEX_DIR FAISSインデックスディレクトリ
-HOST_BOOK_DIR         book_categories.jsonを含むディレクトリ
+HOST_METADATA_DIR     各種データを含むディレクトリ
 HOST_PDF_DIR          PDFファイルのディレクトリ
 HOST_IMAGE_DIR        ページ画像のディレクトリ
 ```
