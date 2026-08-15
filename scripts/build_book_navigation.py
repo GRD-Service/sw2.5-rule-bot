@@ -19,17 +19,17 @@ from pydantic import BaseModel, Field
 # Version
 # ============================================================
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
-# TOCは今回検出方式を変更したためversionを上げる。
-TOC_CHECKPOINT_VERSION = 2
+# TOCの探索方式を変更したため更新。
+TOC_CHECKPOINT_VERSION = 3
 
-# INDEXの既存checkpointはそのまま再利用する。
-INDEX_CHECKPOINT_VERSION = 1
+# INDEXはタイル処理方式を変更したため更新。
+INDEX_CHECKPOINT_VERSION = 2
 
 
 # ============================================================
-# Helpers: environment
+# Environment helpers
 # ============================================================
 
 def env_bool(
@@ -90,7 +90,7 @@ NAVIGATION_WORK_DIR = Path(
 
 
 # ============================================================
-# Model / request settings
+# Model settings
 # ============================================================
 
 NAVIGATION_MODEL = os.getenv(
@@ -159,12 +159,23 @@ NAVIGATION_TILE_OVERLAP = float(
     )
 )
 
+# root page -> 2x2 -> さらに2x2
+#
+# depth=0: ページ全体
+# depth=1: 1/4
+# depth=2: 1/16
+NAVIGATION_MAX_TILE_DEPTH = int(
+    os.getenv(
+        "NAVIGATION_MAX_TILE_DEPTH",
+        "2",
+    )
+)
+
 
 # ============================================================
 # TOC settings
 # ============================================================
 
-# OCRで目次見出しを探す範囲。
 TOC_SCAN_END_RATIO = float(
     os.getenv(
         "TOC_SCAN_END_RATIO",
@@ -172,7 +183,6 @@ TOC_SCAN_END_RATIO = float(
     )
 )
 
-# 目次開始ページから最大何ページ確認するか。
 TOC_MAX_PAGES = int(
     os.getenv(
         "TOC_MAX_PAGES",
@@ -180,7 +190,6 @@ TOC_MAX_PAGES = int(
     )
 )
 
-# 目次seedが近接していた場合に統合する距離。
 TOC_SEED_COLLAPSE_DISTANCE = int(
     os.getenv(
         "TOC_SEED_COLLAPSE_DISTANCE",
@@ -188,12 +197,28 @@ TOC_SEED_COLLAPSE_DISTANCE = int(
     )
 )
 
-# OCRから「目次 / CONTENTS」が一件も見つからなかった場合、
-# 巻頭から何ページを画像モデルで確認するか。
+# OCRで目次を発見できなかった場合、
+# logical page 1 の何ページ前まで確認するか。
+TOC_FALLBACK_BEFORE_LOGICAL_ONE = int(
+    os.getenv(
+        "TOC_FALLBACK_BEFORE_LOGICAL_ONE",
+        "8",
+    )
+)
+
+# logical page 1 の何ページ後まで確認するか。
+TOC_FALLBACK_AFTER_LOGICAL_ONE = int(
+    os.getenv(
+        "TOC_FALLBACK_AFTER_LOGICAL_ONE",
+        "20",
+    )
+)
+
+# page mapにlogical 1がない場合のみ使う。
 TOC_FALLBACK_SCAN_PAGES = int(
     os.getenv(
         "TOC_FALLBACK_SCAN_PAGES",
-        "12",
+        "24",
     )
 )
 
@@ -225,7 +250,7 @@ MAX_INDEX_HEADING_LENGTH = int(
 
 
 # ============================================================
-# Rebuild settings
+# Rebuild
 # ============================================================
 
 FORCE_REBUILD = env_bool(
@@ -243,11 +268,6 @@ PAGE_IMAGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-
-# ------------------------------------------------------------
-# TOC
-# ------------------------------------------------------------
-
 TOC_HEADING_PATTERNS = (
     re.compile(
         r"目次",
@@ -262,11 +282,6 @@ TOC_HEADING_PATTERNS = (
         re.IGNORECASE,
     ),
 )
-
-
-# ------------------------------------------------------------
-# INDEX
-# ------------------------------------------------------------
 
 INDEX_HEADING_PATTERN = re.compile(
     r"^(.{0,30}?索引)$"
@@ -284,7 +299,7 @@ PURE_PAGE_NUMBER_PATTERN = re.compile(
 
 
 # ============================================================
-# Structured output: TOC
+# Structured Output - TOC
 # ============================================================
 
 class TocEntry(BaseModel):
@@ -307,8 +322,7 @@ class TocEntry(BaseModel):
         default=1,
         description=(
             "見た目上の階層。"
-            "章などの大項目=1、"
-            "その下=2、さらに下=3。"
+            "大項目=1、その下=2、さらに下=3。"
             "不明なら1。"
         ),
     )
@@ -317,8 +331,8 @@ class TocEntry(BaseModel):
 class TocPageExtraction(BaseModel):
     is_toc_page: bool = Field(
         description=(
-            "画像が目次ページ、または目次の続きならtrue。"
-            "タイル画像の場合、目次項目が含まれていればtrue。"
+            "画像が目次ページ、"
+            "目次の続き、または目次タイルならtrue。"
         )
     )
 
@@ -328,13 +342,13 @@ class TocPageExtraction(BaseModel):
 
 
 # ============================================================
-# Structured output: INDEX
+# Structured Output - INDEX
 # ============================================================
 
 class IndexEntry(BaseModel):
     term: str = Field(
         description=(
-            "索引に実際に印刷されている索引項目名。"
+            "索引に実際に印刷されている項目名。"
             "画像から確認できない文字は推測しない。"
         )
     )
@@ -342,7 +356,7 @@ class IndexEntry(BaseModel):
     logical_pages: list[int] = Field(
         default_factory=list,
         description=(
-            "その項目に対応して印刷されている書籍ページ番号。"
+            "索引項目に対応する書籍上のページ番号。"
             "PDFページ番号ではない。"
         ),
     )
@@ -351,10 +365,8 @@ class IndexEntry(BaseModel):
 class IndexSection(BaseModel):
     index_type: str = Field(
         description=(
-            "画像に書かれている索引分類名。"
-            "例: 索引、一般索引、魔法索引、"
-            "戦闘特技索引、魔物索引、流派索引など。"
-            "未知の分類でも表記をそのまま返す。"
+            "画像に印刷されている索引分類名。"
+            "未知の分類でも画像の表記をそのまま返す。"
         )
     )
 
@@ -366,8 +378,8 @@ class IndexSection(BaseModel):
 class IndexPageExtraction(BaseModel):
     is_index_page: bool = Field(
         description=(
-            "画像が索引ページ、索引の続き、"
-            "またはタイル内に索引項目が含まれていればtrue。"
+            "画像が索引ページ、"
+            "索引の続き、または索引タイルならtrue。"
         )
     )
 
@@ -383,7 +395,7 @@ class IndexPageExtraction(BaseModel):
 TOC_SYSTEM_PROMPT = """
 あなたは日本語TRPGルールブックの目次を構造化する担当です。
 
-画像には書籍の目次ページ、目次の続き、
+入力画像には書籍の目次ページ、目次の続き、
 またはその一部分が含まれている可能性があります。
 
 規則:
@@ -395,50 +407,44 @@ TOC_SYSTEM_PROMPT = """
 4. 複数カラム、縦書き、横書きがあり得る。
 5. OCRの行順より画像上の配置を優先する。
 6. ページ自体のノンブルを目次の参照ページと誤認しない。
-7. 見た目の階層をlevelとして1～3程度で表現する。
+7. 見た目の階層をlevel=1～3程度で表現する。
 8. 判別できないページ番号はnullにする。
 9. 判読不能な文字を推測しない。
-10. タイル画像の場合でも、目次項目が含まれていれば
+10. タイル画像の場合も、目次項目が存在すれば
     is_toc_page=true とする。
-11. タイル境界で項目名またはページ番号が欠けている場合は、
+11. タイル境界で項目名またはページ番号が欠ける場合は
     推測せず、その項目を省略する。
-12. 通常の本文ページ、章扉、一覧表、データ表は
-    目次ページではない。
-13. ページ上部や下部に章名や部名がナビゲーションとして
-    印刷されているだけの場合も、目次ページではない。
-14. 「第一部」「第二部」などの文字が存在するだけでは
-    目次とは判定しない。
-15. 目次ページ、または目次の連続ページであることが
-    画像レイアウトから確認できる場合だけ
-    is_toc_page=true とする。
+12. 通常本文、章扉、一覧表、データ表は目次ではない。
+13. ページ上部や下部に章名や部名があるだけなら目次ではない。
+14. 「第一部」「第二部」などがあるだけでは目次判定しない。
+15. 項目名と参照ページ番号が多数並ぶ、
+    明確な目次レイアウトを重視する。
 """
 
 
 INDEX_SYSTEM_PROMPT = """
 あなたは日本語TRPGルールブックの索引を構造化する担当です。
 
-画像には書籍の索引ページ、索引の続き、
+入力画像には書籍の索引ページ、索引の続き、
 またはその一部分が含まれている可能性があります。
 
 規則:
 
 1. 画像に実際に印刷されている索引項目だけを抽出する。
 2. 項目名を知識や文脈から補完・修正・推測しない。
-3. ページ番号は書籍に印刷されたページ番号であり、
+3. ページ番号は書籍上のページ番号であり、
    PDFページ番号ではない。
 4. 複数カラム、縦書き、横書きがあり得る。
 5. OCRの行順より画像上の配置を優先する。
 6. 「ア行」「カ行」「人物」「組織」「地名」など、
-   単なる分類見出しは索引項目にしない。
+   単なる分類見出しは項目にしない。
 7. ページ自体のノンブルを参照ページと誤認しない。
-8. 索引分類には固定された一覧はない。
-9. 「一般索引」「魔法索引」「流派索引」など、
-   画像の分類名をそのままindex_typeへ入れる。
-10. 単に「索引」とだけ書かれていれば
-    index_type="索引" とする。
-11. タイル画像の場合でも索引項目があれば
+8. 索引分類には固定一覧はない。
+9. 索引分類名は画像の表記をそのまま返す。
+10. 単に「索引」ならindex_type="索引"とする。
+11. タイル画像の場合も索引項目が存在すれば
     is_index_page=true とする。
-12. タイル境界で項目名またはページ番号が欠けている場合は、
+12. タイル境界で項目名または番号が欠ける場合は
     推測せず、その項目を省略する。
 13. 正確性を最優先する。
 """
@@ -489,7 +495,7 @@ def atomic_write_json(
 
 
 # ============================================================
-# OCR
+# OCR loading
 # ============================================================
 
 def load_ocr(
@@ -722,7 +728,7 @@ def normalize_index_type(
 
 
 # ============================================================
-# TOC seed detection
+# TOC OCR seed detection
 # ============================================================
 
 def is_toc_heading(
@@ -735,8 +741,7 @@ def is_toc_heading(
     if not value:
         return False
 
-    # 本文中の文章として「目次」が言及されたケースを
-    # seedにしないため、短い行だけを対象にする。
+    # 本文中の「目次」への言及を除外。
     if len(
         value
     ) > 40:
@@ -746,8 +751,7 @@ def is_toc_heading(
         pattern.search(
             value
         )
-        for pattern
-        in TOC_HEADING_PATTERNS
+        for pattern in TOC_HEADING_PATTERNS
     )
 
 
@@ -755,16 +759,6 @@ def collapse_nearby_seeds(
     seeds: list[int],
     distance: int,
 ) -> list[int]:
-    """
-    近接したseedを同じ目次ブロックとみなし、
-    最初のページだけを残す。
-
-    例:
-        [4, 6] -> [4]
-
-    ただし、
-        [4, 50] -> [4, 50]
-    """
     if not seeds:
         return []
 
@@ -801,19 +795,6 @@ def collapse_nearby_seeds(
 def find_toc_seed_pages(
     pages: list[dict],
 ) -> list[int]:
-    """
-    OCR上で明示的な
-
-        目次
-        目次 CONTENTS
-        CONTENTS
-        もくじ
-
-    が検出されたページのみをseedとする。
-
-    通常本文の「目次らしさ」は判定しない。
-    """
-
     if not pages:
         return []
 
@@ -843,30 +824,118 @@ def find_toc_seed_pages(
         lines = [
             line
             for line
-            in page[
-                "text"
-            ].splitlines()
+            in page["text"].splitlines()
             if line.strip()
         ]
 
-        heading_found = any(
+        if any(
             is_toc_heading(
                 line
             )
             for line in lines
-        )
-
-        if heading_found:
+        ):
             seeds.append(
                 pdf_page
             )
 
     return collapse_nearby_seeds(
         seeds,
-        distance=(
-            TOC_SEED_COLLAPSE_DISTANCE
-        ),
+        TOC_SEED_COLLAPSE_DISTANCE,
     )
+
+
+# ============================================================
+# TOC fallback candidates
+# ============================================================
+
+def build_toc_fallback_pages(
+    pages: list[dict],
+    pdf_to_logical: dict[int, int],
+) -> list[int]:
+    """
+    全書籍に目次がある前提。
+
+    logical page 1を基準にして、
+    まずlogical 1そのものを確認。
+
+    次に前付け方向、
+    最後に本文側を確認する。
+
+    これにより表紙等が多い書籍でも
+    PDF先頭N枚だけで探索終了しない。
+    """
+
+    pdf_pages = sorted(
+        page["pdf_page"]
+        for page in pages
+    )
+
+    if not pdf_pages:
+        return []
+
+    logical_one_pdf = None
+
+    for pdf_page in pdf_pages:
+        if (
+            pdf_to_logical.get(
+                pdf_page
+            ) == 1
+        ):
+            logical_one_pdf = (
+                pdf_page
+            )
+            break
+
+    if logical_one_pdf is None:
+        return pdf_pages[
+            :TOC_FALLBACK_SCAN_PAGES
+        ]
+
+    pdf_page_set = set(
+        pdf_pages
+    )
+
+    candidates = []
+
+    def add_candidate(
+        pdf_page: int,
+    ) -> None:
+        if (
+            pdf_page in pdf_page_set
+            and pdf_page not in candidates
+        ):
+            candidates.append(
+                pdf_page
+            )
+
+    # まず本文1ページ目。
+    add_candidate(
+        logical_one_pdf
+    )
+
+    # 次に前付け側。
+    for delta in range(
+        1,
+        TOC_FALLBACK_BEFORE_LOGICAL_ONE
+        + 1,
+    ):
+        add_candidate(
+            logical_one_pdf
+            - delta
+        )
+
+    # 最後に本文側。
+    for delta in range(
+        1,
+        TOC_FALLBACK_AFTER_LOGICAL_ONE
+        + 1,
+    ):
+        add_candidate(
+            logical_one_pdf
+            + delta
+        )
+
+    return candidates
 
 
 # ============================================================
@@ -958,18 +1027,6 @@ def find_raw_toc_index_seed_pages(
     pages: list[dict],
     logical_to_pdf: dict[int, int],
 ) -> list[int]:
-    """
-    目次OCR内に
-
-        一般索引 ...... 476
-        魔法索引 ...... 477
-
-    などが存在した場合、
-    索引ページ候補として利用する。
-
-    これは目次そのものの検出とは独立して行う。
-    """
-
     if not pages:
         return []
 
@@ -997,9 +1054,7 @@ def find_raw_toc_index_seed_pages(
         lines = [
             line.strip()
             for line
-            in page[
-                "text"
-            ].splitlines()
+            in page["text"].splitlines()
             if line.strip()
         ]
 
@@ -1081,7 +1136,7 @@ def find_raw_toc_index_seed_pages(
 
 
 # ============================================================
-# Image lookup / manipulation
+# Image helpers
 # ============================================================
 
 def build_image_lookup(
@@ -1357,26 +1412,18 @@ def build_base_model():
 def build_models():
     base = build_base_model()
 
-    toc_model = (
+    return (
         base.with_structured_output(
             TocPageExtraction
-        )
-    )
-
-    index_model = (
+        ),
         base.with_structured_output(
             IndexPageExtraction
-        )
-    )
-
-    return (
-        toc_model,
-        index_model,
+        ),
     )
 
 
 # ============================================================
-# Error detection
+# Error handling
 # ============================================================
 
 def is_length_limit_error(
@@ -1392,6 +1439,7 @@ def is_length_limit_error(
         "maximum output",
         "maximum context",
         "completion_tokens=32768",
+        "completion_tokens=12000",
         "finish_reason='length'",
         'finish_reason": "length',
     )
@@ -1403,7 +1451,7 @@ def is_length_limit_error(
 
 
 # ============================================================
-# Checkpoint versions
+# Checkpoint
 # ============================================================
 
 def checkpoint_version_for_kind(
@@ -1420,16 +1468,11 @@ def checkpoint_version_for_kind(
         )
 
     raise ValueError(
-        "Unknown checkpoint kind: "
-        f"{kind}"
+        f"Unknown checkpoint kind: {kind}"
     )
 
 
-# ============================================================
-# Checkpoint paths
-# ============================================================
-
-def checkpoint_path(
+def page_checkpoint_path(
     book_name: str,
     kind: str,
     pdf_page: int,
@@ -1442,29 +1485,20 @@ def checkpoint_path(
     )
 
 
-def tile_checkpoint_path(
+def region_checkpoint_path(
     book_name: str,
     kind: str,
     pdf_page: int,
-    row: int,
-    col: int,
+    region_id: str,
 ) -> Path:
     return (
         NAVIGATION_WORK_DIR
         / book_name
         / kind
-        / f"P{pdf_page:05d}_tiles"
-        / (
-            f"tile_"
-            f"{row:02d}_"
-            f"{col:02d}.json"
-        )
+        / f"P{pdf_page:05d}_regions"
+        / f"{region_id}.json"
     )
 
-
-# ============================================================
-# Checkpoint IO
-# ============================================================
 
 def load_checkpoint(
     path: Path,
@@ -1528,10 +1562,11 @@ def save_checkpoint(
 
 
 # ============================================================
-# Model invocation
+# LLM invocation
 # ============================================================
 
 def invoke_image_model(
+    *,
     model,
     system_prompt: str,
     book_name: str,
@@ -1539,8 +1574,7 @@ def invoke_image_model(
     logical_page: int | None,
     image: Image.Image,
     ocr_text: str,
-    *,
-    tile_description: str | None = None,
+    region_description: str | None = None,
 ):
     data_url = image_to_data_url(
         image
@@ -1549,32 +1583,38 @@ def invoke_image_model(
     context = (
         f"書籍名: {book_name}\n"
         f"PDFページ: {pdf_page}\n"
-        f"推定書籍ページ: "
-        f"{logical_page}\n"
+        f"推定書籍ページ: {logical_page}\n"
     )
 
-    if tile_description:
+    if region_description:
         context += (
             "画像領域: "
-            f"{tile_description}\n"
+            f"{region_description}\n"
         )
 
-    context += (
-        "\n以下はGoogle Vision OCRです。"
-        "OCRの行順より画像レイアウトを"
-        "優先してください。\n"
-        "--- OCR ---\n"
-        f"{ocr_text}\n"
-        "--- OCR END ---"
-    )
+    if ocr_text:
+        context += (
+            "\n以下はGoogle Vision OCRです。"
+            "OCRの行順より画像レイアウトを"
+            "優先してください。\n"
+            "--- OCR ---\n"
+            f"{ocr_text}\n"
+            "--- OCR END ---"
+        )
+
+    else:
+        context += (
+            "\nこの画像は元ページの一部分です。"
+            "この画像領域内に完全に表示されている"
+            "項目だけを抽出してください。"
+            "画像外の内容は推測しないでください。"
+        )
 
     return model.invoke(
         [
             {
                 "role": "system",
-                "content": (
-                    system_prompt
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
@@ -1586,12 +1626,8 @@ def invoke_image_model(
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": (
-                                data_url
-                            ),
-                            "detail": (
-                                "high"
-                            ),
+                            "url": data_url,
+                            "detail": "high",
                         },
                     },
                 ],
@@ -1601,7 +1637,7 @@ def invoke_image_model(
 
 
 # ============================================================
-# Merge TOC extractions
+# Extraction merging
 # ============================================================
 
 def merge_toc_extractions(
@@ -1640,7 +1676,6 @@ def merge_toc_extractions(
                     logical_page = int(
                         logical_page
                     )
-
                 except (
                     TypeError,
                     ValueError,
@@ -1711,10 +1746,6 @@ def merge_toc_extractions(
     }
 
 
-# ============================================================
-# Merge INDEX extractions
-# ============================================================
-
 def merge_index_extractions(
     extractions: list[dict],
 ) -> dict:
@@ -1757,7 +1788,7 @@ def merge_index_extractions(
                 if not term:
                     continue
 
-                logical_pages = []
+                pages = []
 
                 for page in entry.get(
                     "logical_pages",
@@ -1767,7 +1798,6 @@ def merge_index_extractions(
                         page = int(
                             page
                         )
-
                     except (
                         TypeError,
                         ValueError,
@@ -1775,17 +1805,17 @@ def merge_index_extractions(
                         continue
 
                     if page > 0:
-                        logical_pages.append(
+                        pages.append(
                             page
                         )
 
-                logical_pages = sorted(
+                pages = sorted(
                     set(
-                        logical_pages
+                        pages
                     )
                 )
 
-                if not logical_pages:
+                if not pages:
                     continue
 
                 key = (
@@ -1813,7 +1843,7 @@ def merge_index_extractions(
                 ][
                     "logical_pages"
                 ].update(
-                    logical_pages
+                    pages
                 )
 
     sections = defaultdict(
@@ -1878,8 +1908,234 @@ def merge_index_extractions(
     }
 
 
+def merge_extractions(
+    kind: str,
+    extractions: list[dict],
+) -> dict:
+    if kind == "toc":
+        return merge_toc_extractions(
+            extractions
+        )
+
+    if kind == "index":
+        return merge_index_extractions(
+            extractions
+        )
+
+    raise ValueError(
+        f"Unknown kind: {kind}"
+    )
+
+
 # ============================================================
-# Generic page extraction
+# Recursive region fallback
+# ============================================================
+
+def extract_region_recursive(
+    *,
+    kind: str,
+    model,
+    system_prompt: str,
+    book_name: str,
+    pdf_page: int,
+    logical_page: int | None,
+    image: Image.Image,
+    depth: int,
+    region_id: str,
+) -> dict:
+    """
+    分割画像専用。
+
+    OCR全文は渡さない。
+
+    それでもlength limitになった場合、
+    NAVIGATION_MAX_TILE_DEPTHまで再帰分割する。
+    """
+
+    cp_path = region_checkpoint_path(
+        book_name=book_name,
+        kind=kind,
+        pdf_page=pdf_page,
+        region_id=region_id,
+    )
+
+    checkpoint = load_checkpoint(
+        cp_path,
+        kind,
+    )
+
+    if checkpoint is not None:
+        print(
+            f"      checkpoint "
+            f"region={region_id}",
+            flush=True,
+        )
+
+        return checkpoint[
+            "extraction"
+        ]
+
+    started = time.monotonic()
+
+    try:
+        result = invoke_image_model(
+            model=model,
+            system_prompt=(
+                system_prompt
+            ),
+            book_name=(
+                book_name
+            ),
+            pdf_page=pdf_page,
+            logical_page=(
+                logical_page
+            ),
+            image=image,
+            ocr_text="",
+            region_description=(
+                f"{region_id}, "
+                f"split-depth={depth}"
+            ),
+        )
+
+        extraction = (
+            result.model_dump()
+        )
+
+        elapsed = (
+            time.monotonic()
+            - started
+        )
+
+        print(
+            f"      completed "
+            f"region={region_id} "
+            f"depth={depth} "
+            f"in {elapsed:.1f}s",
+            flush=True,
+        )
+
+        save_checkpoint(
+            cp_path,
+            kind=kind,
+            pdf_page=pdf_page,
+            mode=(
+                f"region-depth-{depth}"
+            ),
+            extraction=(
+                extraction
+            ),
+        )
+
+        return extraction
+
+    except Exception as exc:
+        elapsed = (
+            time.monotonic()
+            - started
+        )
+
+        if not is_length_limit_error(
+            exc
+        ):
+            raise
+
+        if (
+            depth
+            >= NAVIGATION_MAX_TILE_DEPTH
+        ):
+            print(
+                f"      ERROR length limit "
+                f"region={region_id} "
+                f"depth={depth} "
+                f"after {elapsed:.1f}s",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            raise
+
+        print(
+            f"      length limit "
+            f"region={region_id} "
+            f"depth={depth} "
+            f"after {elapsed:.1f}s "
+            "-> subdivide",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # Recursively subdivide
+    # --------------------------------------------------------
+
+    child_results = []
+
+    for tile in create_tiles(
+        image
+    ):
+        row = tile[
+            "row"
+        ]
+
+        col = tile[
+            "col"
+        ]
+
+        child_id = (
+            f"{region_id}_"
+            f"{row}_{col}"
+        )
+
+        child = extract_region_recursive(
+            kind=kind,
+            model=model,
+            system_prompt=(
+                system_prompt
+            ),
+            book_name=(
+                book_name
+            ),
+            pdf_page=pdf_page,
+            logical_page=(
+                logical_page
+            ),
+            image=tile[
+                "image"
+            ],
+            depth=(
+                depth + 1
+            ),
+            region_id=(
+                child_id
+            ),
+        )
+
+        child_results.append(
+            child
+        )
+
+    merged = merge_extractions(
+        kind,
+        child_results,
+    )
+
+    save_checkpoint(
+        cp_path,
+        kind=kind,
+        pdf_page=pdf_page,
+        mode=(
+            f"subdivided-depth-{depth}"
+        ),
+        extraction=(
+            merged
+        ),
+    )
+
+    return merged
+
+
+# ============================================================
+# Whole page extraction
 # ============================================================
 
 def extract_page_with_fallback(
@@ -1893,7 +2149,7 @@ def extract_page_with_fallback(
     image_path: Path,
     ocr_text: str,
 ) -> dict:
-    cp_path = checkpoint_path(
+    cp_path = page_checkpoint_path(
         book_name,
         kind,
         pdf_page,
@@ -1907,8 +2163,7 @@ def extract_page_with_fallback(
     if checkpoint is not None:
         print(
             f"    checkpoint "
-            f"{kind} "
-            f"PDF={pdf_page}",
+            f"{kind} PDF={pdf_page}",
             flush=True,
         )
 
@@ -1923,44 +2178,35 @@ def extract_page_with_fallback(
         NAVIGATION_IMAGE_MAX_SIDE,
     )
 
-    started_at = (
-        time.monotonic()
-    )
+    started = time.monotonic()
 
     try:
-        extraction_model = (
-            invoke_image_model(
-                model=model,
-                system_prompt=(
-                    system_prompt
-                ),
-                book_name=(
-                    book_name
-                ),
-                pdf_page=(
-                    pdf_page
-                ),
-                logical_page=(
-                    logical_page
-                ),
-                image=image,
-                ocr_text=ocr_text,
-            )
+        result = invoke_image_model(
+            model=model,
+            system_prompt=(
+                system_prompt
+            ),
+            book_name=book_name,
+            pdf_page=pdf_page,
+            logical_page=(
+                logical_page
+            ),
+            image=image,
+            ocr_text=ocr_text,
         )
 
         extraction = (
-            extraction_model.model_dump()
+            result.model_dump()
         )
 
         elapsed = (
             time.monotonic()
-            - started_at
+            - started
         )
 
         print(
             f"    completed "
-            f"{kind} "
-            f"PDF={pdf_page} "
+            f"{kind} PDF={pdf_page} "
             f"in {elapsed:.1f}s",
             flush=True,
         )
@@ -1980,7 +2226,7 @@ def extract_page_with_fallback(
     except Exception as exc:
         elapsed = (
             time.monotonic()
-            - started_at
+            - started
         )
 
         if not is_length_limit_error(
@@ -1990,24 +2236,21 @@ def extract_page_with_fallback(
 
         print(
             f"    length limit "
-            f"{kind} "
-            f"PDF={pdf_page} "
+            f"{kind} PDF={pdf_page} "
             f"after {elapsed:.1f}s "
-            "-> tile fallback",
+            "-> recursive tile fallback",
             flush=True,
         )
 
     # --------------------------------------------------------
-    # Tile fallback
+    # First-level tiles
     # --------------------------------------------------------
 
-    tiles = create_tiles(
+    tile_results = []
+
+    for tile in create_tiles(
         image
-    )
-
-    tile_extractions = []
-
-    for tile in tiles:
+    ):
         row = tile[
             "row"
         ]
@@ -2016,48 +2259,13 @@ def extract_page_with_fallback(
             "col"
         ]
 
-        tile_path = (
-            tile_checkpoint_path(
-                book_name=(
-                    book_name
-                ),
+        region_id = (
+            f"d1_{row}_{col}"
+        )
+
+        result = (
+            extract_region_recursive(
                 kind=kind,
-                pdf_page=(
-                    pdf_page
-                ),
-                row=row,
-                col=col,
-            )
-        )
-
-        tile_checkpoint = (
-            load_checkpoint(
-                tile_path,
-                kind,
-            )
-        )
-
-        if tile_checkpoint is not None:
-            print(
-                "      checkpoint "
-                f"tile {row},{col}",
-                flush=True,
-            )
-
-            tile_extractions.append(
-                tile_checkpoint[
-                    "extraction"
-                ]
-            )
-
-            continue
-
-        tile_started = (
-            time.monotonic()
-        )
-
-        tile_result = (
-            invoke_image_model(
                 model=model,
                 system_prompt=(
                     system_prompt
@@ -2074,71 +2282,27 @@ def extract_page_with_fallback(
                 image=tile[
                     "image"
                 ],
-                ocr_text=ocr_text,
-                tile_description=(
-                    f"tile row={row}, "
-                    f"col={col}"
+                depth=1,
+                region_id=(
+                    region_id
                 ),
             )
         )
 
-        tile_extraction = (
-            tile_result.model_dump()
+        tile_results.append(
+            result
         )
 
-        tile_elapsed = (
-            time.monotonic()
-            - tile_started
-        )
-
-        print(
-            "      completed "
-            f"tile {row},{col} "
-            f"in {tile_elapsed:.1f}s",
-            flush=True,
-        )
-
-        save_checkpoint(
-            tile_path,
-            kind=kind,
-            pdf_page=(
-                pdf_page
-            ),
-            mode="tile",
-            extraction=(
-                tile_extraction
-            ),
-        )
-
-        tile_extractions.append(
-            tile_extraction
-        )
-
-    if kind == "toc":
-        extraction = (
-            merge_toc_extractions(
-                tile_extractions
-            )
-        )
-
-    elif kind == "index":
-        extraction = (
-            merge_index_extractions(
-                tile_extractions
-            )
-        )
-
-    else:
-        raise ValueError(
-            "Unknown extraction kind: "
-            f"{kind}"
-        )
+    extraction = merge_extractions(
+        kind,
+        tile_results,
+    )
 
     save_checkpoint(
         cp_path,
         kind=kind,
         pdf_page=pdf_page,
-        mode="tiles",
+        mode="recursive_tiles",
         extraction=(
             extraction
         ),
@@ -2148,7 +2312,7 @@ def extract_page_with_fallback(
 
 
 # ============================================================
-# TOC fallback seed search
+# TOC fallback
 # ============================================================
 
 def find_toc_seed_by_image_fallback(
@@ -2164,32 +2328,12 @@ def find_toc_seed_by_image_fallback(
     dict[int, dict],
     list[dict],
 ]:
-    """
-    OCRで目次見出しが一件も検出されなかった場合のみ実行。
-
-    書籍先頭からTOC_FALLBACK_SCAN_PAGESページだけを
-    画像モデルで確認し、最初の目次ページをseedとする。
-
-    全書籍・全前半ページを候補化することはしない。
-    """
-
-    if not pages:
-        return (
-            [],
-            {},
-            [],
-        )
-
-    pdf_pages = sorted(
-        page[
-            "pdf_page"
-        ]
-        for page in pages
+    candidates = build_toc_fallback_pages(
+        pages=pages,
+        pdf_to_logical=(
+            pdf_to_logical
+        ),
     )
-
-    candidates = pdf_pages[
-        :TOC_FALLBACK_SCAN_PAGES
-    ]
 
     page_results = {}
     errors = []
@@ -2255,15 +2399,6 @@ def find_toc_seed_by_image_fallback(
             )
 
         except Exception as exc:
-            print(
-                "    ERROR fallback "
-                f"toc PDF={pdf_page}: "
-                f"{type(exc).__name__}: "
-                f"{exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-
             errors.append(
                 {
                     "kind": "toc",
@@ -2332,13 +2467,6 @@ def extract_page_sequences(
     dict[int, dict],
     list[dict],
 ]:
-    """
-    seedページから後続ページを順番に解析する。
-
-    一度対象ページを確認した後、
-    非対象ページになった時点でsequenceを終了する。
-    """
-
     page_results = dict(
         initial_page_results
         or {}
@@ -2416,8 +2544,7 @@ def extract_page_sequences(
                     f"  extracting "
                     f"{kind} "
                     f"PDF={pdf_page} "
-                    f"logical="
-                    f"{logical_page}",
+                    f"logical={logical_page}",
                     flush=True,
                 )
 
@@ -2451,7 +2578,7 @@ def extract_page_sequences(
 
                 except Exception as exc:
                     print(
-                        "    ERROR "
+                        f"    ERROR "
                         f"{kind} "
                         f"PDF={pdf_page}: "
                         f"{type(exc).__name__}: "
@@ -2499,8 +2626,7 @@ def extract_page_sequences(
 
             else:
                 raise ValueError(
-                    "Unknown extraction "
-                    f"kind: {kind}"
+                    f"Unknown kind: {kind}"
                 )
 
             if positive:
@@ -2509,14 +2635,10 @@ def extract_page_sequences(
                 continue
 
             if found_positive:
-                # 一度目次/索引が始まった後に
-                # 非対象ページへ到達したので終了。
                 break
 
             initial_misses += 1
 
-            # seed自体がOCR誤認だった場合、
-            # 次ページまでは確認する。
             if initial_misses >= 2:
                 break
 
@@ -2575,7 +2697,6 @@ def build_final_toc(
                     logical_page = int(
                         logical_page
                     )
-
                 except (
                     TypeError,
                     ValueError,
@@ -2589,7 +2710,6 @@ def build_final_toc(
                         1,
                     )
                 )
-
             except (
                 TypeError,
                 ValueError,
@@ -2670,9 +2790,6 @@ def build_final_toc(
             item
         )
 
-    # 目次は元の順番が重要なので、
-    # logical_page中心で並べる。
-    # page番号がないものは末尾。
     result.sort(
         key=lambda item: (
             item[
@@ -2751,26 +2868,23 @@ def build_final_index(
 
                 logical_pages = []
 
-                for logical_page in (
-                    entry.get(
-                        "logical_pages",
-                        [],
-                    )
+                for page in entry.get(
+                    "logical_pages",
+                    [],
                 ):
                     try:
-                        logical_page = int(
-                            logical_page
+                        page = int(
+                            page
                         )
-
                     except (
                         TypeError,
                         ValueError,
                     ):
                         continue
 
-                    if logical_page > 0:
+                    if page > 0:
                         logical_pages.append(
-                            logical_page
+                            page
                         )
 
                 logical_pages = sorted(
@@ -2846,9 +2960,7 @@ def build_final_index(
         result.append(
             {
                 "term": (
-                    item[
-                        "term"
-                    ]
+                    item["term"]
                 ),
                 "index_type": (
                     item[
@@ -2879,9 +2991,7 @@ def build_final_index(
                 "index_type"
             ],
             normalize_term_key(
-                item[
-                    "term"
-                ]
+                item["term"]
             ),
         )
     )
@@ -2924,7 +3034,6 @@ def index_seed_pages_from_toc(
             pdf_page = int(
                 pdf_page
             )
-
         except (
             TypeError,
             ValueError,
@@ -2943,14 +3052,55 @@ def index_seed_pages_from_toc(
 
 
 # ============================================================
+# Resolved error cleanup
+# ============================================================
+
+def remove_resolved_errors(
+    *,
+    errors: list[dict],
+    toc_page_results: dict[int, dict],
+    index_page_results: dict[int, dict],
+) -> list[dict]:
+    """
+    同じページが後のseedから再試行され成功した場合、
+    以前のエラーを最終結果に残さない。
+    """
+
+    unresolved = []
+
+    for error in errors:
+        kind = error.get(
+            "kind"
+        )
+
+        pdf_page = error.get(
+            "pdf_page"
+        )
+
+        if kind == "toc":
+            if pdf_page in toc_page_results:
+                continue
+
+        elif kind == "index":
+            if pdf_page in index_page_results:
+                continue
+
+        unresolved.append(
+            error
+        )
+
+    return unresolved
+
+
+# ============================================================
 # Completion handling
 # ============================================================
 
+# 全書籍にTOCがある前提なので、
+# INDEX_ONLYやNO_NAVIGATIONは完成扱いにしない。
 TERMINAL_STATUSES = {
     "OK",
     "TOC_ONLY",
-    "INDEX_ONLY",
-    "NO_NAVIGATION",
 }
 
 
@@ -2972,7 +3122,6 @@ def existing_completed_result(
         data = load_json(
             path
         )
-
     except Exception:
         return None
 
@@ -3048,7 +3197,7 @@ def process_book(
     )
 
     # ========================================================
-    # TOC seed detection
+    # TOC - OCR heading first
     # ========================================================
 
     toc_seeds = (
@@ -3066,14 +3215,54 @@ def process_book(
         else "image_fallback"
     )
 
-    # --------------------------------------------------------
-    # OCRで明示的な目次見出しが見つからなかった場合だけ
-    # 巻頭を限定的に画像確認する。
-    # --------------------------------------------------------
-
-    if not toc_seeds:
+    if toc_seeds:
         (
-            toc_seeds,
+            toc_page_results,
+            toc_errors,
+        ) = extract_page_sequences(
+            kind="toc",
+            seed_pages=(
+                toc_seeds
+            ),
+            max_pages=(
+                TOC_MAX_PAGES
+            ),
+            valid_pdf_pages=(
+                valid_pdf_pages
+            ),
+            page_by_pdf=(
+                page_by_pdf
+            ),
+            pdf_to_logical=(
+                pdf_to_logical
+            ),
+            image_lookup=(
+                image_lookup
+            ),
+            model=toc_model,
+            system_prompt=(
+                TOC_SYSTEM_PROMPT
+            ),
+            book_name=(
+                book_name
+            ),
+        )
+
+    # ========================================================
+    # TOC - fallback if OCR seed missing OR OCR seed was false
+    # ========================================================
+
+    has_detected_toc_page = any(
+        extraction.get(
+            "is_toc_page"
+        )
+        for extraction
+        in toc_page_results.values()
+    )
+
+    if not has_detected_toc_page:
+        (
+            fallback_seeds,
             fallback_results,
             fallback_errors,
         ) = find_toc_seed_by_image_fallback(
@@ -3103,53 +3292,57 @@ def process_book(
             fallback_errors
         )
 
-    # --------------------------------------------------------
-    # TOC continuous pages
-    # --------------------------------------------------------
+        if fallback_seeds:
+            toc_detection_method = (
+                "image_fallback"
+            )
 
-    if toc_seeds:
-        (
-            sequence_results,
-            sequence_errors,
-        ) = extract_page_sequences(
-            kind="toc",
-            seed_pages=(
-                toc_seeds
-            ),
-            max_pages=(
-                TOC_MAX_PAGES
-            ),
-            valid_pdf_pages=(
-                valid_pdf_pages
-            ),
-            page_by_pdf=(
-                page_by_pdf
-            ),
-            pdf_to_logical=(
-                pdf_to_logical
-            ),
-            image_lookup=(
-                image_lookup
-            ),
-            model=toc_model,
-            system_prompt=(
-                TOC_SYSTEM_PROMPT
-            ),
-            book_name=(
-                book_name
-            ),
-            initial_page_results=(
-                toc_page_results
-            ),
-        )
+            toc_seeds = (
+                fallback_seeds
+            )
 
-        toc_page_results.update(
-            sequence_results
-        )
+            (
+                sequence_results,
+                sequence_errors,
+            ) = extract_page_sequences(
+                kind="toc",
+                seed_pages=(
+                    fallback_seeds
+                ),
+                max_pages=(
+                    TOC_MAX_PAGES
+                ),
+                valid_pdf_pages=(
+                    valid_pdf_pages
+                ),
+                page_by_pdf=(
+                    page_by_pdf
+                ),
+                pdf_to_logical=(
+                    pdf_to_logical
+                ),
+                image_lookup=(
+                    image_lookup
+                ),
+                model=toc_model,
+                system_prompt=(
+                    TOC_SYSTEM_PROMPT
+                ),
+                book_name=(
+                    book_name
+                ),
+                initial_page_results=(
+                    toc_page_results
+                ),
+            )
 
-        toc_errors.extend(
-            sequence_errors
-        )
+            toc_page_results.update(
+                sequence_results
+            )
+
+            toc_errors.extend(
+                sequence_errors
+            )
 
     toc = build_final_toc(
         page_results=(
@@ -3161,7 +3354,7 @@ def process_book(
     )
 
     # ========================================================
-    # INDEX seed detection
+    # INDEX
     # ========================================================
 
     index_seeds = set(
@@ -3170,14 +3363,12 @@ def process_book(
         )
     )
 
-    # LLMで解析した目次から索引開始ページを取得。
     index_seeds.update(
         index_seed_pages_from_toc(
             toc
         )
     )
 
-    # OCR目次から直接索引開始ページを取得するfallback。
     index_seeds.update(
         find_raw_toc_index_seed_pages(
             pages=pages,
@@ -3235,13 +3426,25 @@ def process_book(
     )
 
     # ========================================================
-    # Status
+    # Resolve old page errors if a later retry succeeded
     # ========================================================
 
-    errors = (
-        toc_errors
-        + index_errors
+    errors = remove_resolved_errors(
+        errors=(
+            toc_errors
+            + index_errors
+        ),
+        toc_page_results=(
+            toc_page_results
+        ),
+        index_page_results=(
+            index_page_results
+        ),
     )
+
+    # ========================================================
+    # Status
+    # ========================================================
 
     has_toc = bool(
         toc
@@ -3251,50 +3454,39 @@ def process_book(
         index_entries
     )
 
-    if errors:
+    # TOC is mandatory in this collection.
+    if not has_toc:
         status = "WARNING"
 
+        if has_index:
+            reason = (
+                "index extracted but "
+                "toc was not detected"
+            )
+        else:
+            reason = (
+                "toc was not detected"
+            )
+
+    elif errors:
+        status = "WARNING"
         reason = (
             "navigation extracted "
-            "with page-level errors"
+            "with unresolved page-level errors"
         )
 
-    elif (
-        has_toc
-        and has_index
-    ):
+    elif has_index:
         status = "OK"
-
         reason = (
             "toc and index extracted"
         )
 
-    elif has_toc:
+    else:
         status = "TOC_ONLY"
-
         reason = (
             "toc extracted; "
             "no index found"
         )
-
-    elif has_index:
-        status = "INDEX_ONLY"
-
-        reason = (
-            "index extracted; "
-            "no toc found"
-        )
-
-    else:
-        status = "NO_NAVIGATION"
-
-        reason = (
-            "no toc or index found"
-        )
-
-    # ========================================================
-    # Diagnostic page lists
-    # ========================================================
 
     detected_toc_pages = sorted(
         pdf_page
@@ -3315,7 +3507,7 @@ def process_book(
     )
 
     # ========================================================
-    # Final JSON
+    # Output
     # ========================================================
 
     result = {
@@ -3626,8 +3818,6 @@ def main() -> int:
     for status in (
         "OK",
         "TOC_ONLY",
-        "INDEX_ONLY",
-        "NO_NAVIGATION",
         "WARNING",
         "ERROR",
     ):
@@ -3656,8 +3846,6 @@ def main() -> int:
                 f"{result['reason']}"
             )
 
-    # WARNINGは部分成果を利用できる。
-    # ERRORのみ終了コード1。
     if summary[
         "ERROR"
     ]:

@@ -120,6 +120,8 @@ services:
 
 
   index-builder:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
     build:
       context: .
       dockerfile: docker/app/Dockerfile
@@ -147,6 +149,8 @@ services:
       - build_faiss_index.py
 
   pdf-optimizer:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
     build:
       context: .
       dockerfile: docker/pdf-optimizer/Dockerfile
@@ -170,6 +174,8 @@ services:
       - /app/scripts/optimize_pdfs.py
 
   ocr-builder:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
     build:
       context: .
       dockerfile: docker/ocr-builder/Dockerfile
@@ -210,6 +216,8 @@ services:
       - /app/scripts/google_vision_ocr.py
 
   page-map-builder:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
     build:
       context: .
       dockerfile: docker/app/Dockerfile
@@ -241,6 +249,8 @@ services:
       - /app/scripts/build_page_map.py
 
   book-navigation-builder:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
     build:
       context: .
       dockerfile: docker/app/Dockerfile
