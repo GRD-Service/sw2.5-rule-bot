@@ -750,18 +750,31 @@ prompt = PromptTemplate(
 )
 
 
-def normalize_chat_history(
-    history: Optional[List[ChatMessage]],
-    max_messages: int = 12,
-) -> list[dict]:
-    result = []
+def normalize_chat_history(history) -> list[dict]:
+    normalized = []
+
     for message in history or []:
-        role = str(message.role or "").strip().lower()
-        content = str(message.content or "").strip()
-        if role not in {"user", "assistant"} or not content:
+        if isinstance(message, dict):
+            role = str(message.get("role") or "").strip().lower()
+            content = str(message.get("content") or "").strip()
+        else:
+            role = str(getattr(message, "role", "") or "").strip().lower()
+            content = str(getattr(message, "content", "") or "").strip()
+
+        if role not in {"user", "assistant"}:
             continue
-        result.append({"role": role, "content": content})
-    return result[-max_messages:]
+
+        if not content:
+            continue
+
+        normalized.append(
+            {
+                "role": role,
+                "content": content,
+            }
+        )
+
+    return normalized
 
 
 def format_conversation_history(history: list[dict]) -> str:
