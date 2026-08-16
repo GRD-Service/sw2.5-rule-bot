@@ -813,70 +813,45 @@ def collapse_repeated_citations(answer: str) -> str:
         return answer
 
     lines = answer.splitlines()
-
-    # [C5]、[C5][C9]、およびその後ろのMarkdown改行用空白を含めて認識する。
-    citation_pattern = re.compile(r"(?:\s*\[C\d+\])+\s*$")
+    citation_pattern = re.compile(r"(?:\s*\[C\d+\])+$")
     citation_id_pattern = re.compile(r"\[C(\d+)\]")
 
     def line_citations(line: str) -> list[int]:
         match = citation_pattern.search(line)
         if not match:
             return []
-        return [
-            int(value)
-            for value in citation_id_pattern.findall(match.group(0))
-        ]
+        return [int(value) for value in citation_id_pattern.findall(match.group(0))]
 
     def strip_ids(line: str, ids: set[int]) -> str:
         if not ids:
             return line
-
         match = citation_pattern.search(line)
         if not match:
             return line
-
         suffix = match.group(0)
-
         kept = [
             int(value)
             for value in citation_id_pattern.findall(suffix)
             if int(value) not in ids
         ]
-
-        # Citationより前の本文。
-        base = line[:match.start()].rstrip()
-
+        base = line[: match.start()].rstrip()
         if kept:
-            return base + "".join(
-                f"[C{value}]"
-                for value in kept
-            )
-
+            return base + " " + "".join(f"[C{value}]" for value in kept)
         return base
 
-    # 空行で区切られた範囲を1ブロックとして処理する。
+    # 空行で区切られない連続行を1ブロックとして扱う。
     block_start = 0
-
     while block_start < len(lines):
-        while (
-            block_start < len(lines)
-            and not lines[block_start].strip()
-        ):
+        while block_start < len(lines) and not lines[block_start].strip():
             block_start += 1
-
         if block_start >= len(lines):
             break
 
         block_end = block_start
-
-        while (
-            block_end + 1 < len(lines)
-            and lines[block_end + 1].strip()
-        ):
+        while block_end + 1 < len(lines) and lines[block_end + 1].strip():
             block_end += 1
 
-        last_occurrence: dict[int, int] = {}
-
+        last_occurrence = {}
         for index in range(block_start, block_end + 1):
             for citation_id in line_citations(lines[index]):
                 last_occurrence[citation_id] = index
@@ -887,11 +862,7 @@ def collapse_repeated_citations(answer: str) -> str:
                 for citation_id in line_citations(lines[index])
                 if last_occurrence.get(citation_id) != index
             }
-
-            lines[index] = strip_ids(
-                lines[index],
-                remove_ids,
-            )
+            lines[index] = strip_ids(lines[index], remove_ids)
 
         block_start = block_end + 1
 
