@@ -1,33 +1,68 @@
 document.addEventListener("webviewerloaded", () => {
   const options = window.PDFViewerApplicationOptions;
+  const app = window.PDFViewerApplication;
 
-  if (!options) {
-    console.error(
-      "PDF.js: PDFViewerApplicationOptions is not available."
-    );
+  if (!options || !app) {
+    console.error("PDF.js application objects are not available.");
     return;
   }
 
-  // SW2.5 Rule Bot default viewer settings.
-  //
-  // These are defaults only.
-  // Stored PDF.js user preferences are loaded afterwards and therefore
-  // override these values when the user has changed them.
+  const defaults = {
+    defaultZoomValue: "page-fit",
+    scrollModeOnLoad: 0,
+    spreadModeOnLoad: 2,
+  };
 
-  // ページ全体を表示
-  options.set("defaultZoomValue", "page-fit");
+  options.set("defaultZoomValue", defaults.defaultZoomValue);
+  options.set("scrollModeOnLoad", defaults.scrollModeOnLoad);
+  options.set("spreadModeOnLoad", defaults.spreadModeOnLoad);
 
-  // 縦スクロール
-  options.set("scrollModeOnLoad", 0);
+  let storedPreferences = {};
 
-  // 偶数ページ見開き
-  // 1ページ目を単独、その後 2-3, 4-5, ...
-  options.set("spreadModeOnLoad", 2);
+  try {
+    storedPreferences = JSON.parse(
+      localStorage.getItem("pdfjs.preferences") || "{}"
+    );
+  } catch (error) {
+    console.warn(
+      "Could not read PDF.js preferences:",
+      error
+    );
+  }
+
+  app.initializedPromise.then(() => {
+    app.eventBus.on("pagesinit", () => {
+      // URLで zoom が指定されていれば最優先
+      const hash = new URLSearchParams(
+        window.location.hash.substring(1)
+      );
+
+      if (hash.has("zoom")) {
+        return;
+      }
+
+      // ユーザーがズーム設定を保存済みなら尊重
+      if (
+        Object.prototype.hasOwnProperty.call(
+          storedPreferences,
+          "defaultZoomValue"
+        )
+      ) {
+        return;
+      }
+
+      // 初回ユーザーのみ page-fit
+      if (app.pdfViewer) {
+        app.pdfViewer.currentScaleValue =
+          defaults.defaultZoomValue;
+      }
+    });
+  });
 
   console.info(
     "PDF.js defaults:",
-    "zoom=page-fit",
-    "scrollMode=0",
-    "spreadMode=2"
+    defaults,
+    "stored preferences:",
+    storedPreferences
   );
 });
