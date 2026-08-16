@@ -355,9 +355,8 @@ template = """
 - サプリメントや追加書籍の記述は、基本ルールを置き換えるものと明記されていない限り、追加情報・補足情報として扱ってください。
 - 質問が希少種、追加種族、追加技能、追加魔法、追加アイテム、追加戦闘特技など、特定の追加要素を明示している場合は、その要素を収録したサプリメント側の記述を優先してください。
 - 基本種と希少種、基本ルールと追加ルールなど、異なる対象を混同しないでください。
-- 表・テーブル・一覧・チャートを求める質問でも、原則として表本体の全行・全数値を回答本文へ転記しないでください。表の用途、収録範囲、版ごとの差異、どの出典を確認すべきかを簡潔に説明してください。
-- ユーザーが特定の値・特定の行・特定レベルなどを明示的に質問した場合に限り、コンテキストから確認できる必要な値を回答してください。
-- 表・テーブル・一覧・チャートが複数書籍にある場合は、最初に見つかった1冊だけで回答を終えず、各表の収録範囲を確認してください。より完全・拡張された表がある場合は、その存在と収録範囲を案内し、簡略版・初心者向け・追加範囲の表との違いが分かるようにしてください。
+- 表・テーブル・一覧・チャートを求める質問では、原則として表そのものを回答本文へ転記する必要はありません。何の表か、どの範囲を収録しているか、どの出典を参照すべきかを簡潔に説明してください。正確な数値・項目は出典ページを参照できるようにしてください。
+- 表・テーブル・一覧・チャートが複数書籍にある場合は、最初に見つかった1冊だけで回答を終えず、各表の収録範囲を確認してください。より完全・拡張された表がある場合は、それが存在することと収録範囲を回答で明示してください。簡略版・初心者向け・追加範囲の表も、参照価値があれば区別して示してください。
 - 同一テーマについて複数書籍に直接関係する規定・例外・追加ルールがコンテキストにある場合、質問が横断的な情報収集を求めているなら、基本ルールだけで回答を打ち切らず、重複を避けつつ異なる内容を拾ってください。
 - 「○○を使った流派はあるか」のような存在確認では、直接一致だけでなく、同義のカテゴリ表記や「流派」「秘伝」など関連する本文から具体例を探してください。
 - 十分な根拠がコンテキストにない場合は、その旨を明確に回答してください。
@@ -521,12 +520,12 @@ def query_requests_broad_coverage(question: str) -> bool:
 def build_answer_guidance(question: str) -> str:
     if query_is_structured(question):
         return (
-            "この質問は表・テーブル・一覧・チャートに関する質問です。"
+            "この質問は表・テーブル・一覧・チャートを探しています。"
             "コンテキスト内の構造化データページを複数書籍ぶん確認してください。"
-            "ただし、表本体の全行・全数値を回答本文へ再構成して転記する必要はありません。"
-            "表の用途、収録範囲、簡略版・完全版・拡張版などの違いと、"
-            "確認すべき出典が分かるように説明してください。"
-            "ユーザーが特定の値や行を明示的に求めている場合だけ、その必要な値を回答してください。"
+            "回答本文へ表の数値を転記することより、どの出典にどの範囲の表があるかを"
+            "簡潔に案内することを優先してください。"
+            "簡略版と完全版がある場合は、完全版・収録範囲の広い版を明示し、"
+            "他書籍の表に追加範囲や差異があれば区別して案内してください。"
         )
     if query_requests_broad_coverage(question):
         return (
@@ -808,11 +807,107 @@ def extract_used_citation_ids(answer: str) -> list[int]:
     return used
 
 
+def collapse_repeated_citations(answer: str) -> str:
+    """同一引用が連続する段落・箇条書きでは、最後の出現だけを残す。"""
+    if not answer:
+        return answer
+
+    lines = answer.splitlines()
+    citation_pattern = re.compile(r"(?:\s*\[C\d+\])+$")
+    citation_id_pattern = re.compile(r"\[C(\d+)\]")
+
+    def line_citations(line: str) -> list[int]:
+        match = citation_pattern.search(line)
+        if not match:
+            return []
+        return [int(value) for value in citation_id_pattern.findall(match.group(0))]
+
+    def strip_ids(line: str, ids: set[int]) -> str:
+        if not ids:
+            return line
+        match = citation_pattern.search(line)
+        if not match:
+            return line
+        suffix = match.group(0)
+        kept = [
+            int(value)
+            for value in citation_id_pattern.findall(suffix)
+            if int(value) not in ids
+        ]
+        base = line[: match.start()].rstrip()
+        if kept:
+            return base + " " + "".join(f"[C{value}]" for value in kept)
+        return base
+
+    # 空行で区切られない連続行を1ブロックとして扱う。
+    block_start = 0
+    while block_start < len(lines):
+        while block_start < len(lines) and not lines[block_start].strip():
+            block_start += 1
+        if block_start >= len(lines):
+            break
+
+        block_end = block_start
+        while block_end + 1 < len(lines) and lines[block_end + 1].strip():
+            block_end += 1
+
+        last_occurrence = {}
+        for index in range(block_start, block_end + 1):
+            for citation_id in line_citations(lines[index]):
+                last_occurrence[citation_id] = index
+
+        for index in range(block_start, block_end + 1):
+            remove_ids = {
+                citation_id
+                for citation_id in line_citations(lines[index])
+                if last_occurrence.get(citation_id) != index
+            }
+            lines[index] = strip_ids(lines[index], remove_ids)
+
+        block_start = block_end + 1
+
+    return "\n".join(lines)
+
+
+def citation_query_relevance(citation: Citation, question: str) -> float:
+    """未使用出典を返す際の最低限の質問関連度を評価する。"""
+    query_terms = extract_query_terms(question)
+    haystack = " ".join(
+        value
+        for value in (
+            citation.excerpt or "",
+            citation.reason or "",
+        )
+        if value
+    )
+    normalized_haystack = normalize_navigation_text(haystack)
+    score = 0.0
+
+    normalized_query = normalize_navigation_text(normalize_search_query(question))
+    if normalized_query and normalized_query in normalized_haystack:
+        score += 30.0
+
+    for term in query_terms:
+        normalized_term = normalize_navigation_text(term)
+        if not normalized_term:
+            continue
+        if normalized_term in normalized_haystack:
+            score += 12.0
+        else:
+            score += char_ngram_coverage(
+                normalized_term,
+                normalized_haystack,
+                2,
+            ) * 3.0
+    return score
+
+
 def select_return_citations(
     answer: str,
     citations: List[Citation],
     context_items: list[dict],
     structured_query: bool,
+    question: str,
 ) -> List[Citation]:
     used_ids = extract_used_citation_ids(answer)
     used_set = set(used_ids)
@@ -870,7 +965,17 @@ def select_return_citations(
         if not structured_query and source == "hybrid":
             continue
 
-        score = float(meta.get("score", 0.0)) + source_bonus.get(source, 0.0)
+        relevance = citation_query_relevance(citation, question)
+        # navigation/reference由来でも、質問語との関連がほぼ確認できないページは
+        # supplemental citationとして返さない。
+        if not structured_query and relevance < 4.0:
+            continue
+
+        score = (
+            float(meta.get("score", 0.0))
+            + source_bonus.get(source, 0.0)
+            + relevance
+        )
         candidates.append((citation, score, source))
 
     candidates.sort(key=lambda item: item[1], reverse=True)
@@ -1805,75 +1910,6 @@ def build_exact_search_items(results, question: str) -> list[dict]:
     return items
 
 
-
-def compact_consecutive_citations(answer: str) -> str:
-    """連続する同一引用セットは、意味上のまとまりの最後だけに残す。"""
-    if not answer:
-        return answer
-
-    citation_pattern = re.compile(r"(?:\s*\[C\d+\])+\s*$")
-
-    def citation_signature(line: str) -> tuple[int, ...] | None:
-        match = citation_pattern.search(line)
-        if not match:
-            return None
-        ids = tuple(
-            int(value)
-            for value in re.findall(r"\[C(\d+)\]", match.group(0))
-        )
-        return ids or None
-
-    def strip_trailing_citations(line: str) -> str:
-        return citation_pattern.sub("", line).rstrip()
-
-    lines = answer.splitlines()
-    result = []
-    pending_indices: list[int] = []
-    pending_signature: tuple[int, ...] | None = None
-
-    def flush_pending():
-        nonlocal pending_indices, pending_signature
-        if len(pending_indices) >= 2:
-            for index in pending_indices[:-1]:
-                result[index] = strip_trailing_citations(result[index])
-        pending_indices = []
-        pending_signature = None
-
-    for line in lines:
-        stripped = line.strip()
-        signature = citation_signature(line)
-
-        # 空行・見出し・箇条書き境界では別の意味ブロックとして扱う。
-        is_boundary = (
-            not stripped
-            or stripped.startswith("#")
-            or re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line) is not None
-        )
-
-        if is_boundary:
-            flush_pending()
-            result.append(line)
-            continue
-
-        if signature is None:
-            flush_pending()
-            result.append(line)
-            continue
-
-        result.append(line)
-        current_index = len(result) - 1
-
-        if pending_signature == signature:
-            pending_indices.append(current_index)
-        else:
-            flush_pending()
-            pending_signature = signature
-            pending_indices = [current_index]
-
-    flush_pending()
-    return "\n".join(result)
-
-
 # ============================================================
 # /ask
 # ============================================================
@@ -2033,13 +2069,13 @@ def ask_question(request: QueryRequest):
     llm = ChatOpenAI(model_name=model_name, temperature=0)
     response = llm.invoke(full_prompt)
 
-    answer = compact_consecutive_citations(response.content)
-
+    answer = collapse_repeated_citations(response.content)
     returned_citations = select_return_citations(
         answer,
         citations,
         context_items,
         structured_query=query_is_structured(question),
+        question=question,
     )
     sources = citations_to_legacy_sources(returned_citations)
 
