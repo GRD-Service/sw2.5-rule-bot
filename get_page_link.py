@@ -111,23 +111,51 @@ def get_citation_links(
     citation: dict,
 ) -> tuple[str | None, str | None]:
     """
-    APIの構造化citationからリンクを生成する。
+    構造化citationからリンクを生成する。
+
+    表示:
+        citation["page"]
+        = 書籍に印刷されたページ番号
+
+    リンク:
+        citation["pdf_page"]
+        = PDF/JPEG内部ページ番号
+
+    古いAPI responseとの互換性のため、
+    pdf_pageがなければpageへfallbackする。
     """
 
-    book = citation.get("book")
-    page = citation.get("page")
+    book = citation.get(
+        "book"
+    )
 
-    if not book or page is None:
+    pdf_page = citation.get(
+        "pdf_page",
+        citation.get(
+            "page"
+        ),
+    )
+
+    if (
+        not book
+        or pdf_page is None
+    ):
         return None, None
 
     try:
-        page = int(page)
-    except (TypeError, ValueError):
+        pdf_page = int(
+            pdf_page
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
         return None, None
 
     return get_page_and_image_links(
         book,
-        page,
+        pdf_page,
     )
 
 

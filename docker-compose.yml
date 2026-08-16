@@ -9,15 +9,41 @@ x-python-service: &python-service
 
   environment:
     OPENAI_API_KEY: ${OPENAI_API_KEY}
+
     OCR_DIR: /data/ocr
     INDEX_DIR: /data/vector_index
 
     METADATA_DIR: /data/metadata
     BOOK_CATEGORY_PATH: /data/metadata/book_categories.json
 
+    NAVIGATION_DIR: /data/metadata/navigation
+    NAVIGATION_REQUIRED: "1"
+
+    # 通常Hybridの候補母集団
+    HYBRID_CANDIDATE_K: "100"
+
+    # navigation
+    NAV_INDEX_MAX_PAGES: "8"
+    NAV_TOC_MAX_PAGES: "4"
+
+    NAV_SECTION_EXPAND_PAGES: "2"
+    NAV_SECTION_MAX_PAGES: "6"
+
+    NAV_MANDATORY_MAX_PAGES: "12"
+
+    # navigation 1ページから最大3chunk
+    NAV_CHUNKS_PER_PAGE: "3"
+
+    # LLMコンテキストの安全上限
+    CONTEXT_MAX_DOCS: "48"
+
+    NAV_INDEX_FUZZY_THRESHOLD: "0.72"
+    NAV_TOC_FUZZY_THRESHOLD: "0.60"
+
     PDF_DIR: /data/pdf
     PDFJS_BASE_URL: ${PDFJS_BASE_URL}
     IMAGE_BASE_URL: ${IMAGE_BASE_URL}
+
     EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
 
   volumes:
