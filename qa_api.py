@@ -68,6 +68,9 @@ QUERY_VARIANT_MAX = int(os.getenv("QUERY_VARIANT_MAX", "6"))
 STRUCTURED_MAX_PAGES = int(os.getenv("STRUCTURED_MAX_PAGES", "8"))
 STRUCTURED_PAGES_PER_BOOK = int(os.getenv("STRUCTURED_PAGES_PER_BOOK", "2"))
 STRUCTURED_CHUNKS_PER_PAGE = int(os.getenv("STRUCTURED_CHUNKS_PER_PAGE", "2"))
+# 構造化データページは、表の途中がchunk境界で欠けないよう本文全体をcontextへ入れる。
+STRUCTURED_CONTEXT_MAX_CHARS = int(os.getenv("STRUCTURED_CONTEXT_MAX_CHARS", "6000"))
+STRUCTURED_FULL_PAGE_MAX = int(os.getenv("STRUCTURED_FULL_PAGE_MAX", "3"))
 
 # 本文中の「⇒161頁」「次頁」等を追跡する。
 REFERENCE_EXPAND_MAX_PAGES = int(os.getenv("REFERENCE_EXPAND_MAX_PAGES", "8"))
@@ -352,9 +355,14 @@ template = """
 - サプリメントや追加書籍の記述は、基本ルールを置き換えるものと明記されていない限り、追加情報・補足情報として扱ってください。
 - 質問が希少種、追加種族、追加技能、追加魔法、追加アイテム、追加戦闘特技など、特定の追加要素を明示している場合は、その要素を収録したサプリメント側の記述を優先してください。
 - 基本種と希少種、基本ルールと追加ルールなど、異なる対象を混同しないでください。
-- 表・テーブル・一覧・チャートを求める質問では、最初に見つかった表だけで終わらず、コンテキスト内に同種の表が複数書籍にあるなら比較してください。より完全・拡張された表が確認できる場合はそれを優先し、簡略版や初心者向けの表との関係も必要に応じて説明してください。
+- 表・テーブル・一覧・チャートを求める質問では、表の存在や用途を説明するだけで終わらず、コンテキストに表本体の数値・項目がある場合は、その内容をMarkdown表または読みやすい一覧として回答に含めてください。
+- 表・テーブル・一覧・チャートが複数書籍にある場合は、最初に見つかった1冊だけで回答を終えず、各表の収録範囲を確認してください。より完全・拡張された表がある場合はそれを主として提示し、簡略版・初心者向け・追加範囲の表は必要に応じて併記してください。
+- 同一テーマについて複数書籍に直接関係する規定・例外・追加ルールがコンテキストにある場合、質問が横断的な情報収集を求めているなら、基本ルールだけで回答を打ち切らず、重複を避けつつ異なる内容を拾ってください。
 - 「○○を使った流派はあるか」のような存在確認では、直接一致だけでなく、同義のカテゴリ表記や「流派」「秘伝」など関連する本文から具体例を探してください。
 - 十分な根拠がコンテキストにない場合は、その旨を明確に回答してください。
+
+今回の回答方針:
+{answer_guidance}
 
 コンテキスト:
 {context}
@@ -364,7 +372,7 @@ template = """
 """
 
 prompt = PromptTemplate(
-    input_variables=["context", "question"],
+    input_variables=["context", "question", "answer_guidance"],
     template=template,
 )
 
@@ -433,6 +441,30 @@ def full_page_text(book: str, pdf_page: int) -> str:
     )
 
 
+def structured_context_text(book: str, pdf_page: int, question: str) -> str:
+    """表・一覧ページはchunk境界で欠けないよう、ページ本文をまとめて返す。"""
+    text = full_page_text(book, pdf_page).strip()
+    if len(text) <= STRUCTURED_CONTEXT_MAX_CHARS:
+        return text
+
+    terms = [normalize_search_query(question)] + extract_query_terms(question)
+    positions = [text.find(term) for term in terms if term and text.find(term) >= 0]
+    if positions:
+        center = min(positions)
+        start = max(0, center - STRUCTURED_CONTEXT_MAX_CHARS // 5)
+    else:
+        start = 0
+    end = min(len(text), start + STRUCTURED_CONTEXT_MAX_CHARS)
+    if end - start < STRUCTURED_CONTEXT_MAX_CHARS:
+        start = max(0, end - STRUCTURED_CONTEXT_MAX_CHARS)
+    excerpt = text[start:end]
+    if start > 0:
+        excerpt = "…" + excerpt
+    if end < len(text):
+        excerpt += "…"
+    return excerpt
+
+
 # ============================================================
 # Query normalization / expansion / text scoring
 # ============================================================
@@ -468,6 +500,43 @@ def normalize_navigation_text(value: str) -> str:
 def query_is_structured(question: str) -> bool:
     normalized = normalize_search_query(question)
     return any(term in normalized for term in STRUCTURED_QUERY_TERMS)
+
+
+def query_requests_broad_coverage(question: str) -> bool:
+    """複数資料を横断して規定・補足を集めるべき質問かを判定する。"""
+    text = question.strip()
+    broad_markers = (
+        "に関する情報",
+        "関連する情報",
+        "関連情報",
+        "ルールを教えて",
+        "ルールについて",
+        "規定を教えて",
+        "扱いを教えて",
+    )
+    return any(marker in text for marker in broad_markers)
+
+
+def build_answer_guidance(question: str) -> str:
+    if query_is_structured(question):
+        return (
+            "この質問は表・テーブル・一覧・チャートそのものを求めています。"
+            "コンテキスト内の構造化データページを複数書籍ぶん確認し、"
+            "表の存在説明だけではなく、実際の項目・数値を回答へ含めてください。"
+            "簡略版と完全版がある場合は完全版・収録範囲の広い版を主として扱い、"
+            "他書籍の表に追加範囲や差異があれば併記してください。"
+        )
+    if query_requests_broad_coverage(question):
+        return (
+            "この質問は同一テーマに関する情報を横断的に求めています。"
+            "基本ルールを最初に示したうえで、コンテキスト中の別書籍に"
+            "直接関係する追加規定・例外・補足があるか確認し、"
+            "単なる重複は省きつつ、異なる内容は回答へ含めてください。"
+        )
+    return (
+        "質問対象に直接対応する規定を優先し、基本資料と追加資料の役割を区別して"
+        "必要十分な範囲で回答してください。"
+    )
 
 
 def extract_query_terms(query: str) -> list[str]:
@@ -602,13 +671,13 @@ def chunk_relevance_score(
     return score
 
 
-def build_excerpt(
-    doc,
+def build_excerpt_from_text(
+    raw_text: str,
     query: str,
     reason: str = "",
     max_chars: int = CITATION_EXCERPT_CHARS,
 ) -> str:
-    text = re.sub(r"\s+", " ", doc.page_content or "").strip()
+    text = re.sub(r"\s+", " ", raw_text or "").strip()
     if not text:
         return ""
     if len(text) <= max_chars:
@@ -643,6 +712,20 @@ def build_excerpt(
     if end < len(text):
         excerpt += "…"
     return excerpt
+
+
+def build_excerpt(
+    doc,
+    query: str,
+    reason: str = "",
+    max_chars: int = CITATION_EXCERPT_CHARS,
+) -> str:
+    return build_excerpt_from_text(
+        doc.page_content or "",
+        query,
+        reason,
+        max_chars,
+    )
 
 
 # ============================================================
@@ -691,7 +774,11 @@ def build_citations(context_items: list[dict], question: str) -> List[Citation]:
                 page=logical_page,
                 pdf_page=pdf_page,
                 category=get_document_category(best_doc),
-                excerpt=build_excerpt(best_doc, question, reason),
+                excerpt=build_excerpt_from_text(
+                    best_item.get("context_text") or best_doc.page_content or "",
+                    question,
+                    reason,
+                ),
                 reason=reason or "検索結果から選定",
                 used_in_answer=True,
             )
@@ -761,8 +848,9 @@ def select_return_citations(
     )
 
     source_bonus = {
-        "reference": 80.0,
-        "structured": 70.0,
+        # 表・一覧質問では、未引用でも実際の表本体を最優先で残す。
+        "structured": 220.0 if structured_query else 70.0,
+        "reference": 30.0 if structured_query else 80.0,
         "index": 50.0,
         "toc": 35.0,
         "section": 25.0,
@@ -784,6 +872,16 @@ def select_return_citations(
         candidates.append((citation, score, source))
 
     candidates.sort(key=lambda item: item[1], reverse=True)
+
+    # structured queryでは、まず表本体を別書籍から優先的に確保する。
+    if structured_query:
+        structured_candidates = [
+            item for item in candidates if item[2] == "structured"
+        ]
+        other_candidates = [
+            item for item in candidates if item[2] != "structured"
+        ]
+        candidates = structured_candidates + other_candidates
 
     # structured queryでは書籍の多様性を優先する。
     selected_supplemental = []
@@ -1571,15 +1669,31 @@ def build_context_items(
         )
 
     structured_items = []
-    for candidate in structured_pages:
-        structured_items.extend(
-            select_candidate_page_documents(
-                candidate,
-                question,
-                max_chunks=STRUCTURED_CHUNKS_PER_PAGE,
-                mandatory_first=True,
-            )
+    for structured_rank, candidate in enumerate(structured_pages, start=1):
+        page_items = select_candidate_page_documents(
+            candidate,
+            question,
+            max_chunks=max(1, STRUCTURED_CHUNKS_PER_PAGE),
+            mandatory_first=True,
         )
+        if not page_items:
+            continue
+
+        # 表はchunk境界で行や列が分断されやすい。
+        # 構造化検索で選ばれたページは、代表chunk 1件にページ本文全体を
+        # context_textとして持たせ、1ページ=1context itemとして扱う。
+        best_item = page_items[0]
+        if structured_rank <= STRUCTURED_FULL_PAGE_MAX:
+            best_item["context_text"] = structured_context_text(
+                candidate["book"],
+                candidate["pdf_page"],
+                question,
+            )
+            best_item["reason"] = (
+                best_item.get("reason", "表・一覧検索")
+                + " / 表本体をページ単位で採用"
+            )
+        structured_items.append(best_item)
 
     hybrid_context_items = []
     for rank, item in enumerate(hybrid_items, start=1):
@@ -1826,16 +1940,24 @@ def ask_question(request: QueryRequest):
 
         reason = item.get("reason", "")
         reason_text = f"\n検索補助情報: {reason}" if reason else ""
+        source = item.get("source", "")
+        source_text = f"\n検索種別: {source}" if source else ""
+        context_text = item.get("context_text") or doc.page_content
         context_parts.append(
             f"[CITATION:C{citation_id}]\n"
             f"書籍: {book}\n"
             f"書籍ページ: {logical_page}"
+            f"{source_text}"
             f"{reason_text}\n"
-            f"本文:\n{doc.page_content}"
+            f"本文:\n{context_text}"
         )
 
     context = "\n\n".join(context_parts)
-    full_prompt = prompt.format(context=context, question=question)
+    full_prompt = prompt.format(
+        context=context,
+        question=question,
+        answer_guidance=build_answer_guidance(question),
+    )
 
     llm = ChatOpenAI(model_name=model_name, temperature=0)
     response = llm.invoke(full_prompt)
