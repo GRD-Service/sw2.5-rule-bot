@@ -1,62 +1,73 @@
-(() => {
-  const STORAGE_KEY = "pdfjs.preferences";
+document.addEventListener("webviewerloaded", () => {
+  const app = window.PDFViewerApplication;
 
-  const defaults = {
-    defaultZoomValue: "page-fit",
-    scrollModeOnLoad: 0,
-    spreadModeOnLoad: 2,
-  };
-
-  let preferences = {};
-
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-
-    if (stored) {
-      preferences = JSON.parse(stored) || {};
-    }
-  } catch (error) {
-    console.warn(
-      "PDF.js: failed to read stored preferences:",
-      error
-    );
+  if (!app) {
+    console.error("PDF.js: PDFViewerApplication is not available.");
     return;
   }
 
-  let changed = false;
+  app.initializedPromise.then(() => {
+    app.eventBus.on("documentinit", async () => {
+      const viewer = app.pdfViewer;
+      const store = app.store;
 
-  for (const [name, value] of Object.entries(defaults)) {
-    if (!Object.prototype.hasOwnProperty.call(preferences, name)) {
-      preferences[name] = value;
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(preferences)
-      );
-
-      console.info(
-        "PDF.js initial preferences installed:",
-        defaults
-      );
-    } catch (error) {
-      console.warn(
-        "PDF.js: failed to install initial preferences:",
-        error
-      );
-    }
-  } else {
-    console.info(
-      "PDF.js existing preferences preserved:",
-      {
-        defaultZoomValue: preferences.defaultZoomValue,
-        scrollModeOnLoad: preferences.scrollModeOnLoad,
-        spreadModeOnLoad: preferences.spreadModeOnLoad,
+      if (!viewer || !store) {
+        return;
       }
-    );
-  }
-})();
+
+      try {
+        /*
+         * PDF.js stores per-document display state in ViewHistory.
+         *
+         * By requesting null as the fallback we can distinguish:
+         *
+         *   null       = user has never stored this setting
+         *   non-null   = PDF.js has previous view history
+         */
+        const history = await store.getMultiple({
+          zoom: null,
+          scrollMode: null,
+          spreadMode: null,
+        });
+
+        console.info(
+          "PDF.js existing view history:",
+          history
+        );
+
+        /*
+         * Only apply our defaults when that particular value has
+         * never been stored for this PDF.
+         *
+         * This means subsequent user changes are preserved.
+         */
+
+        if (history.scrollMode === null) {
+          viewer.scrollMode = 0;
+        }
+
+        if (history.spreadMode === null) {
+          viewer.spreadMode = 2;
+        }
+
+        if (history.zoom === null) {
+          viewer.currentScaleValue = "page-fit";
+        }
+
+        console.info(
+          "PDF.js effective defaults:",
+          {
+            zoom: viewer.currentScaleValue,
+            scrollMode: viewer.scrollMode,
+            spreadMode: viewer.spreadMode,
+          }
+        );
+      } catch (error) {
+        console.error(
+          "PDF.js: failed to apply initial view defaults:",
+          error
+        );
+      }
+    });
+  });
+});
