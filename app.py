@@ -469,6 +469,9 @@ def render_assistant_message(message: dict):
         citations,
     )
 
+    # 回答本文は常に表示する。
+    st.markdown(display_text, unsafe_allow_html=True)
+
     technical_lines = []
 
     if metadata.get("model_used"):
