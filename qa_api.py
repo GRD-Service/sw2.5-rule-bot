@@ -10,10 +10,15 @@ import os
 import re
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+from cloudflare_auth import (
+    CloudflareAccessError,
+    verify_cloudflare_access_token,
+)
 
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -336,6 +341,40 @@ class QueryResponse(BaseModel):
     reference_pages_used: Optional[int] = None
     max_k: Optional[int] = None
     token_usage: Optional[dict] = None
+
+# ============================================================
+# Authentication
+# ============================================================
+
+class AuthMeResponse(BaseModel):
+    email: str
+
+@app.get("/auth/me", response_model=AuthMeResponse)
+def auth_me(
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    if not cf_access_jwt_assertion:
+        raise HTTPException(
+            status_code=403,
+            detail="Cf-Access-Jwt-Assertion header is missing",
+        )
+
+    try:
+        payload = verify_cloudflare_access_token(
+            cf_access_jwt_assertion
+        )
+    except CloudflareAccessError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
+    return AuthMeResponse(
+        email=payload["email"],
+    )
 
 
 # ============================================================

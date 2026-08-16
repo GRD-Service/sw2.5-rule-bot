@@ -10,6 +10,9 @@ x-python-service: &python-service
   environment:
     OPENAI_API_KEY: ${OPENAI_API_KEY}
 
+    TEAM_DOMAIN: ${TEAM_DOMAIN}
+    POLICY_AUD: ${POLICY_AUD}
+
     OCR_DIR: /data/ocr
     INDEX_DIR: /data/vector_index
 

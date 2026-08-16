@@ -23,6 +23,53 @@ st.set_page_config(
 st.title("📚 ソード・ワールド2.5 ルールAI bot")
 
 API_URL = os.getenv("QA_API_URL", "http://localhost:8000/ask")
+
+AUTH_ME_URL = API_URL.rsplit("/", 1)[0] + "/auth/me"
+
+
+def get_cloudflare_access_jwt() -> str | None:
+    try:
+        return st.context.headers.get(
+            "Cf-Access-Jwt-Assertion"
+        )
+    except Exception:
+        return None
+
+
+def get_authenticated_user() -> str | None:
+    token = get_cloudflare_access_jwt()
+
+    if not token:
+        return None
+
+    try:
+        response = requests.get(
+            AUTH_ME_URL,
+            headers={
+                "Cf-Access-Jwt-Assertion": token,
+            },
+            timeout=15,
+        )
+    except requests.RequestException:
+        return None
+
+    if response.status_code != 200:
+        return None
+
+    data = response.json()
+    return data.get("email")
+
+authenticated_email = get_authenticated_user()
+
+if authenticated_email:
+    st.sidebar.success(
+        f"認証ユーザー: {authenticated_email}"
+    )
+else:
+    st.sidebar.error(
+        "Cloudflare Accessの認証情報を確認できませんでした。"
+    )
+
 DEFAULT_HYBRID_K = 20
 
 if "history" not in st.session_state:
