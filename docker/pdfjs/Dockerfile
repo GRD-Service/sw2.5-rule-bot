@@ -2,85 +2,72 @@ FROM alpine:3.22 AS downloader
 
 ARG PDFJS_VERSION=5.7.284
 
-ARG PDFJS_DEFAULT_ZOOM=page-fit
-ARG PDFJS_DEFAULT_SCROLL_MODE=0
-ARG PDFJS_DEFAULT_SPREAD_MODE=2
-
-RUN apk add --no-cache curl unzip \
+RUN apk add --no-cache curl unzip python3 \
     && mkdir -p /out/pdfjs \
     && curl -fL \
        "https://github.com/mozilla/pdf.js/releases/download/v${PDFJS_VERSION}/pdfjs-${PDFJS_VERSION}-dist.zip" \
        -o /tmp/pdfjs.zip \
     && unzip /tmp/pdfjs.zip -d /out/pdfjs
 
-RUN cat > /out/pdfjs/web/viewer_defaults.js <<EOF
-(() => {
-  const STORAGE_KEY = "pdfjs.preferences";
+COPY docker/pdfjs/viewer_defaults.js \
+     /out/pdfjs/web/viewer_defaults.js
 
-  const defaults = {
-    defaultZoomValue: "${PDFJS_DEFAULT_ZOOM}",
-    scrollModeOnLoad: ${PDFJS_DEFAULT_SCROLL_MODE},
-    spreadModeOnLoad: ${PDFJS_DEFAULT_SPREAD_MODE},
-  };
+RUN python3 - <<'PY'
+from pathlib import Path
+import re
 
-  let preferences = {};
+path = Path("/out/pdfjs/web/viewer.html")
+text = path.read_text(encoding="utf-8-sig")
 
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
+# viewer.mjs の script タグを属性順に依存せず探す。
+pattern = re.compile(
+    r'<script\b'
+    r'(?=[^>]*\bsrc=["\']viewer\.mjs["\'])'
+    r'(?=[^>]*\btype=["\']module["\'])'
+    r'[^>]*></script>',
+    re.IGNORECASE,
+)
 
-    if (stored) {
-      preferences = JSON.parse(stored) || {};
-    }
-  } catch (error) {
-    console.warn(
-      "PDF.js: failed to read stored preferences:",
-      error
-    );
-    return;
-  }
+matches = list(pattern.finditer(text))
 
-  let changed = false;
+if len(matches) != 1:
+    raise RuntimeError(
+        f"Expected exactly one viewer.mjs script tag, found {len(matches)}"
+    )
 
-  for (const [name, value] of Object.entries(defaults)) {
-    if (!Object.prototype.hasOwnProperty.call(preferences, name)) {
-      preferences[name] = value;
-      changed = true;
-    }
-  }
+viewer_tag = matches[0].group(0)
 
-  if (changed) {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(preferences)
-      );
+replacement = (
+    '<script src="viewer_defaults.js"></script>\n'
+    '    ' + viewer_tag
+)
 
-      console.info(
-        "PDF.js initial preferences installed:",
-        defaults
-      );
-    } catch (error) {
-      console.warn(
-        "PDF.js: failed to install initial preferences:",
-        error
-      );
-    }
-  } else {
-    console.info(
-      "PDF.js existing preferences preserved:",
-      {
-        defaultZoomValue: preferences.defaultZoomValue,
-        scrollModeOnLoad: preferences.scrollModeOnLoad,
-        spreadModeOnLoad: preferences.spreadModeOnLoad,
-      }
-    );
-  }
-})();
-EOF
+text = (
+    text[:matches[0].start()]
+    + replacement
+    + text[matches[0].end():]
+)
 
-RUN sed -i \
-    '0,/<script src="viewer.mjs" type="module"><\/script>/s//<script src="viewer_defaults.js"><\/script>\n    <script src="viewer.mjs" type="module"><\/script>/' \
-    /out/pdfjs/web/viewer.html
+path.write_text(text, encoding="utf-8")
+
+# Build-time verification.
+verify = path.read_text(encoding="utf-8")
+
+if '<script src="viewer_defaults.js"></script>' not in verify:
+    raise RuntimeError("viewer_defaults.js injection failed")
+
+if verify.index('viewer_defaults.js') > verify.index('viewer.mjs'):
+    raise RuntimeError(
+        "viewer_defaults.js must be loaded before viewer.mjs"
+    )
+
+print("Verified viewer_defaults.js injection:")
+print('<script src="viewer_defaults.js"></script>')
+print(viewer_tag)
+PY
+
+RUN test -s /out/pdfjs/web/viewer_defaults.js \
+    && grep -q 'viewer_defaults.js' /out/pdfjs/web/viewer.html
 
 
 FROM nginx:1.28-alpine
