@@ -29,13 +29,17 @@ x-python-service: &python-service
     NAV_SECTION_EXPAND_PAGES: "2"
     NAV_SECTION_MAX_PAGES: "6"
 
+    # navigation由来ページはkとは別枠で保持するが、無制限にはしない
     NAV_MANDATORY_MAX_PAGES: "12"
 
-    # navigation 1ページから最大3chunk
-    NAV_CHUNKS_PER_PAGE: "3"
+    # navigation 1ページから最大2chunk
+    NAV_CHUNKS_PER_PAGE: "2"
 
-    # LLMコンテキストの安全上限
-    CONTEXT_MAX_DOCS: "48"
+    # reranking / pruning後のLLMコンテキスト安全上限
+    CONTEXT_MAX_DOCS: "24"
+
+    # 出典一覧に表示する本文抜粋の最大文字数
+    CITATION_EXCERPT_CHARS: "360"
 
     NAV_INDEX_FUZZY_THRESHOLD: "0.72"
     NAV_TOC_FUZZY_THRESHOLD: "0.60"
