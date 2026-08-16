@@ -13,6 +13,10 @@ x-python-service: &python-service
     TEAM_DOMAIN: ${TEAM_DOMAIN}
     POLICY_AUD: ${POLICY_AUD}
 
+    USER_DB_PATH: ${USER_DB_PATH:-/data/app/sw25.sqlite3}
+    INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL}
+    INITIAL_ADMIN_DISPLAY_NAME: ${INITIAL_ADMIN_DISPLAY_NAME:-}
+
     OCR_DIR: /data/ocr
     INDEX_DIR: /data/vector_index
 
@@ -61,12 +65,16 @@ x-python-service: &python-service
     - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index:ro
     - ${HOST_METADATA_DIR}:/data/metadata:ro
     - ${HOST_PDF_DIR}:/data/pdf:ro
+    - ${HOST_APP_DATA_DIR}:/data/app
 
 
 services:
 
   api:
     <<: *python-service
+
+    # SQLiteをホスト側でroot所有にしない。
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
 
     command:
       - uvicorn

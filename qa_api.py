@@ -19,6 +19,11 @@ from cloudflare_auth import (
     CloudflareAccessError,
     verify_cloudflare_access_token,
 )
+from user_store import (
+    get_user,
+    init_user_store,
+    touch_user_last_seen,
+)
 
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -92,6 +97,9 @@ NAVIGATION_REQUIRED = os.getenv("NAVIGATION_REQUIRED", "1").strip().lower() in {
     "yes",
     "on",
 }
+
+
+init_user_store()
 
 
 # ============================================================
@@ -342,12 +350,34 @@ class QueryResponse(BaseModel):
     max_k: Optional[int] = None
     token_usage: Optional[dict] = None
 
+
 # ============================================================
-# Authentication
+# Authentication / authorization
 # ============================================================
+
 
 class AuthMeResponse(BaseModel):
     email: str
+    display_name: str
+    is_admin: bool
+
+
+def get_verified_cloudflare_email(
+    cf_access_jwt_assertion: str | None,
+) -> str:
+    if not cf_access_jwt_assertion:
+        raise HTTPException(
+            status_code=403,
+            detail="Cf-Access-Jwt-Assertion header is missing",
+        )
+
+    try:
+        payload = verify_cloudflare_access_token(cf_access_jwt_assertion)
+    except CloudflareAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    return payload["email"]
+
 
 @app.get("/auth/me", response_model=AuthMeResponse)
 def auth_me(
@@ -356,24 +386,25 @@ def auth_me(
         alias="Cf-Access-Jwt-Assertion",
     ),
 ):
-    if not cf_access_jwt_assertion:
+    email = get_verified_cloudflare_email(cf_access_jwt_assertion)
+    user = get_user(email)
+
+    if user is None:
         raise HTTPException(
             status_code=403,
-            detail="Cf-Access-Jwt-Assertion header is missing",
+            detail="このCloudflareアカウントはSW2.5ルールBotに登録されていません。",
         )
-
-    try:
-        payload = verify_cloudflare_access_token(
-            cf_access_jwt_assertion
-        )
-    except CloudflareAccessError as exc:
+    if not user["is_active"]:
         raise HTTPException(
             status_code=403,
-            detail=str(exc),
-        ) from exc
+            detail="このSW2.5ルールBotアカウントは無効化されています。",
+        )
 
+    touch_user_last_seen(email)
     return AuthMeResponse(
-        email=payload["email"],
+        email=user["email"],
+        display_name=user["display_name"],
+        is_admin=bool(user["is_admin"]),
     )
 
 

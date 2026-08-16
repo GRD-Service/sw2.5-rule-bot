@@ -23,54 +23,61 @@ st.set_page_config(
 st.title("📚 ソード・ワールド2.5 ルールAI bot")
 
 API_URL = os.getenv("QA_API_URL", "http://localhost:8000/ask")
-
 AUTH_ME_URL = API_URL.rsplit("/", 1)[0] + "/auth/me"
+DEFAULT_HYBRID_K = 20
 
 
 def get_cloudflare_access_jwt() -> str | None:
     try:
-        return st.context.headers.get(
-            "Cf-Access-Jwt-Assertion"
-        )
+        return st.context.headers.get("Cf-Access-Jwt-Assertion")
     except Exception:
         return None
 
 
-def get_authenticated_user() -> str | None:
+def get_authenticated_user() -> tuple[dict | None, str | None]:
     token = get_cloudflare_access_jwt()
 
     if not token:
-        return None
+        return None, "Cloudflare Accessの認証情報が見つかりません。"
 
     try:
         response = requests.get(
             AUTH_ME_URL,
-            headers={
-                "Cf-Access-Jwt-Assertion": token,
-            },
+            headers={"Cf-Access-Jwt-Assertion": token},
             timeout=15,
         )
-    except requests.RequestException:
-        return None
+    except requests.RequestException as exc:
+        return None, f"認証APIへの接続に失敗しました: {exc}"
 
     if response.status_code != 200:
-        return None
+        detail = "認証に失敗しました。"
+        try:
+            detail = response.json().get("detail") or detail
+        except ValueError:
+            pass
+        return None, detail
 
-    data = response.json()
-    return data.get("email")
+    return response.json(), None
 
-authenticated_email = get_authenticated_user()
 
-if authenticated_email:
-    st.sidebar.success(
-        f"認証ユーザー: {authenticated_email}"
-    )
-else:
-    st.sidebar.error(
-        "Cloudflare Accessの認証情報を確認できませんでした。"
-    )
+def get_api_headers() -> dict[str, str]:
+    token = get_cloudflare_access_jwt()
+    if not token:
+        return {}
+    return {"Cf-Access-Jwt-Assertion": token}
 
-DEFAULT_HYBRID_K = 20
+
+authenticated_user, authentication_error = get_authenticated_user()
+
+if not authenticated_user:
+    st.sidebar.error("利用者を確認できませんでした。")
+    st.error(authentication_error or "このアカウントでは利用できません。")
+    st.stop()
+
+display_name = authenticated_user.get("display_name") or authenticated_user["email"]
+st.sidebar.success(
+    f"認証ユーザー: {display_name}\n\n{authenticated_user['email']}"
+)
 
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -512,6 +519,7 @@ if st.session_state.get("question_submitted"):
 
                 response = requests.post(
                     API_URL,
+                    headers=get_api_headers(),
                     json={
                         "question": current_question,
                         "books": selected_books,
