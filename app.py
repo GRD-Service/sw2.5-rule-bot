@@ -571,13 +571,11 @@ if st.sidebar.button(
     use_container_width=True,
     type="primary",
 ):
-    new_chat, error = create_chat()
-    if error:
-        st.sidebar.error(error)
-    elif new_chat:
-        st.session_state.current_chat_id = new_chat["id"]
-        st.session_state.chat_input_nonce += 1
-        st.rerun()
+    # ここではDBへ保存しない。
+    # 最初の質問を送信した時点で初めてチャットを作成する。
+    st.session_state.current_chat_id = None
+    st.session_state.chat_input_nonce += 1
+    st.rerun()
 
 chat_list, chat_list_error = get_chats()
 
@@ -587,21 +585,14 @@ if chat_list_error:
 
 valid_chat_ids = {chat["id"] for chat in chat_list}
 
-if st.session_state.current_chat_id not in valid_chat_ids:
-    st.session_state.current_chat_id = (
-        chat_list[0]["id"] if chat_list else None
-    )
+# 削除済みなどで無効なIDだけ新規状態へ戻す。
+# current_chat_id=None は「まだ保存されていない新しいチャット」として維持する。
+if (
+    st.session_state.current_chat_id is not None
+    and st.session_state.current_chat_id not in valid_chat_ids
+):
+    st.session_state.current_chat_id = None
     st.session_state.chat_input_nonce += 1
-
-if not st.session_state.current_chat_id:
-    new_chat, error = create_chat()
-    if error:
-        st.error(error)
-        st.stop()
-
-    st.session_state.current_chat_id = new_chat["id"]
-    st.session_state.chat_input_nonce += 1
-    st.rerun()
 
 for chat in chat_list:
     title = chat.get("title") or "新しいチャット"
@@ -618,19 +609,20 @@ for chat in chat_list:
             st.session_state.chat_input_nonce += 1
             st.rerun()
 
-with st.sidebar.expander("チャット操作", expanded=False):
-    if st.button(
-        "このチャットを削除",
-        key="delete_current_chat",
-        use_container_width=True,
-    ):
-        error = delete_chat(st.session_state.current_chat_id)
-        if error:
-            st.error(error)
-        else:
-            st.session_state.current_chat_id = None
-            st.session_state.chat_input_nonce += 1
-            st.rerun()
+if st.session_state.current_chat_id:
+    with st.sidebar.expander("チャット操作", expanded=False):
+        if st.button(
+            "このチャットを削除",
+            key="delete_current_chat",
+            use_container_width=True,
+        ):
+            error = delete_chat(st.session_state.current_chat_id)
+            if error:
+                st.error(error)
+            else:
+                st.session_state.current_chat_id = None
+                st.session_state.chat_input_nonce += 1
+                st.rerun()
 
 
 # ============================================================
@@ -935,15 +927,21 @@ if authenticated_user.get("is_admin"):
 # Main chat
 # ============================================================
 
-current_chat, current_chat_error = get_chat_detail(
-    st.session_state.current_chat_id
-)
+if st.session_state.current_chat_id:
+    current_chat, current_chat_error = get_chat_detail(
+        st.session_state.current_chat_id
+    )
 
-if current_chat_error:
-    st.error(current_chat_error)
-    st.stop()
+    if current_chat_error:
+        st.error(current_chat_error)
+        st.stop()
 
-messages = current_chat.get("messages", [])
+    messages = current_chat.get("messages", [])
+else:
+    # 未保存の新規チャット。
+    # 最初の質問を送るまではDBにレコードを作らない。
+    current_chat = None
+    messages = []
 
 # ChatGPT同様、メイン画面には会話だけを上から時系列に並べる。
 # 新規チャットでは何も表示せず、下部の入力欄だけになる。
@@ -964,11 +962,17 @@ for message in messages:
 # Chat input
 # ============================================================
 
+input_chat_key = (
+    st.session_state.current_chat_id
+    if st.session_state.current_chat_id
+    else "new"
+)
+
 question = st.chat_input(
     "質問を入力してください",
     key=(
         f"chat_input_"
-        f"{st.session_state.current_chat_id}_"
+        f"{input_chat_key}_"
         f"{st.session_state.chat_input_nonce}"
     ),
 )
@@ -978,19 +982,39 @@ if question:
     with st.chat_message("user"):
         st.markdown(question)
 
-    with st.chat_message("assistant"):
-        with st.spinner("AIが調査中です..."):
-            error = ask_question(
-                question,
-                chat_id=st.session_state.current_chat_id,
-                books=selected_books,
-                model=selected_model,
-                mode=selected_mode,
-            )
+    created_chat_id = None
+    target_chat_id = st.session_state.current_chat_id
 
-        if error:
-            st.error(error)
-        else:
-            # 回答取得後は必ず新しい空の入力ウィジェットへ切り替える。
-            st.session_state.chat_input_nonce += 1
-            st.rerun()
+    # 未保存の新規チャットなら、最初の質問を送信したこの時点で初めて作成する。
+    if not target_chat_id:
+        new_chat, create_error = create_chat()
+
+        if create_error:
+            st.error(create_error)
+        elif new_chat:
+            created_chat_id = new_chat["id"]
+            target_chat_id = created_chat_id
+            st.session_state.current_chat_id = target_chat_id
+
+    if target_chat_id:
+        with st.chat_message("assistant"):
+            with st.spinner("AIが調査中です..."):
+                error = ask_question(
+                    question,
+                    chat_id=target_chat_id,
+                    books=selected_books,
+                    model=selected_model,
+                    mode=selected_mode,
+                )
+
+            if error:
+                # 今回の送信のためだけに作ったチャットで失敗した場合は、
+                # 空チャットを履歴に残さない。
+                if created_chat_id:
+                    delete_chat(created_chat_id)
+                    st.session_state.current_chat_id = None
+                st.error(error)
+            else:
+                # 回答取得後は必ず新しい空の入力ウィジェットへ切り替える。
+                st.session_state.chat_input_nonce += 1
+                st.rerun()
