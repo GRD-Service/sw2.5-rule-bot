@@ -141,8 +141,6 @@ services:
       dockerfile: docker/pdfjs/Dockerfile
       args:
         PDFJS_VERSION: ${PDFJS_VERSION:-5.7.284}
-
-        # PDF.js viewer defaults
         PDFJS_DEFAULT_ZOOM: ${PDFJS_DEFAULT_ZOOM:-page-fit}
         PDFJS_DEFAULT_SCROLL_MODE: ${PDFJS_DEFAULT_SCROLL_MODE:-0}
         PDFJS_DEFAULT_SPREAD_MODE: ${PDFJS_DEFAULT_SPREAD_MODE:-2}
