@@ -22,6 +22,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.markdown(
+    """
+<style>
+/* Sidebar chat history: compact, flat rows instead of large framed buttons. */
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"] {
+    min-height: 1.75rem;
+    padding: 0.15rem 0.35rem;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    justify-content: flex-start;
+    text-align: left;
+    font-weight: 400;
+}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover {
+    background: rgba(127, 127, 127, 0.12);
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 API_URL = os.getenv("QA_API_URL", "http://localhost:8000/ask")
 API_BASE_URL = API_URL.rsplit("/", 1)[0]
 AUTH_ME_URL = API_BASE_URL + "/auth/me"
@@ -447,15 +469,17 @@ def render_assistant_message(message: dict):
         citations,
     )
 
+    technical_lines = []
+
     if metadata.get("model_used"):
-        display_text += (
-            f"\n\n🔧 使用モデル: `{metadata['model_used']}`"
+        technical_lines.append(
+            f"🔧 使用モデル: `{metadata['model_used']}`"
         )
 
     if metadata.get("token_usage"):
         tokens = metadata["token_usage"]
-        display_text += (
-            "\n\n🧮 トークン数: "
+        technical_lines.append(
+            "🧮 トークン数: "
             f"入力 {tokens.get('prompt_tokens', 0)}, "
             f"出力 {tokens.get('completion_tokens', 0)}, "
             f"合計 {tokens.get('total_tokens', 0)}"
@@ -465,14 +489,12 @@ def render_assistant_message(message: dict):
             metadata.get("model_used"),
             tokens,
         )
-        display_text += (
-            "\n\n💰 推定料金: "
+        technical_lines.append(
+            "💰 推定料金: "
             f"入力: ¥{input_price:.2f} / "
             f"出力: ¥{output_price:.2f} / "
             f"合計: ¥{total_price:.2f}"
         )
-
-    st.markdown(display_text, unsafe_allow_html=True)
 
     if metadata.get("model_used") != "AIは使用していません":
         context_k = int(metadata.get("k_used", 0) or 0)
@@ -484,14 +506,17 @@ def render_assistant_message(message: dict):
         reference_pages = int(
             metadata.get("reference_pages_used", 0) or 0
         )
-
-        st.markdown(
+        technical_lines.append(
             f"📊 推論コンテキスト: **{context_k} chunks** / "
             f"通常検索: **k={hybrid_k}** / "
             f"navigation: **{nav_pages} pages** / "
             f"表・一覧: **{structured_pages} pages** / "
             f"参照先: **{reference_pages} pages**"
         )
+
+    if technical_lines:
+        with st.expander("技術情報", expanded=False):
+            st.markdown("\n\n".join(technical_lines))
 
     if citations:
         used_citations = [
@@ -599,7 +624,7 @@ for chat in chat_list:
     active = chat["id"] == st.session_state.current_chat_id
 
     if st.sidebar.button(
-        ("● " if active else "") + title,
+        ("› " if active else "") + title,
         key=f"chat_select_{chat['id']}",
         use_container_width=True,
     ):
@@ -608,22 +633,6 @@ for chat in chat_list:
             # チャット切替時は、入力途中の文字列を引き継がない。
             st.session_state.chat_input_nonce += 1
             st.rerun()
-
-if st.session_state.current_chat_id:
-    with st.sidebar.expander("チャット操作", expanded=False):
-        if st.button(
-            "このチャットを削除",
-            key="delete_current_chat",
-            use_container_width=True,
-        ):
-            error = delete_chat(st.session_state.current_chat_id)
-            if error:
-                st.error(error)
-            else:
-                st.session_state.current_chat_id = None
-                st.session_state.chat_input_nonce += 1
-                st.rerun()
-
 
 # ============================================================
 # Sidebar: search settings
@@ -928,6 +937,21 @@ if authenticated_user.get("is_admin"):
 # ============================================================
 
 if st.session_state.current_chat_id:
+    toolbar_left, toolbar_right = st.columns([12, 1])
+    with toolbar_right:
+        if st.button(
+            "🗑️",
+            key="delete_current_chat_main",
+            help="このチャットを削除",
+        ):
+            error = delete_chat(st.session_state.current_chat_id)
+            if error:
+                st.error(error)
+            else:
+                st.session_state.current_chat_id = None
+                st.session_state.chat_input_nonce += 1
+                st.rerun()
+
     current_chat, current_chat_error = get_chat_detail(
         st.session_state.current_chat_id
     )
