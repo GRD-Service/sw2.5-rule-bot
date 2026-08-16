@@ -20,9 +20,16 @@ from cloudflare_auth import (
     verify_cloudflare_access_token,
 )
 from user_store import (
+    LastAdminError,
+    UserAlreadyExistsError,
+    UserNotFoundError,
+    UserStoreError,
+    create_user,
     get_user,
     init_user_store,
+    list_users,
     touch_user_last_seen,
+    update_user,
 )
 
 from langchain_community.vectorstores import FAISS
@@ -362,6 +369,31 @@ class AuthMeResponse(BaseModel):
     is_admin: bool
 
 
+class AdminUserResponse(BaseModel):
+    email: str
+    display_name: str
+    is_admin: bool
+    is_active: bool
+    created_at: str
+    updated_at: str
+    last_seen_at: Optional[str] = None
+
+
+class AdminUserCreateRequest(BaseModel):
+    email: str
+    display_name: str = ""
+    is_admin: bool = False
+    is_active: bool = True
+
+
+class AdminUserUpdateRequest(BaseModel):
+    current_email: str
+    email: str
+    display_name: str = ""
+    is_admin: bool = False
+    is_active: bool = True
+
+
 def get_verified_cloudflare_email(
     cf_access_jwt_assertion: str | None,
 ) -> str:
@@ -379,13 +411,11 @@ def get_verified_cloudflare_email(
     return payload["email"]
 
 
-@app.get("/auth/me", response_model=AuthMeResponse)
-def auth_me(
-    cf_access_jwt_assertion: str | None = Header(
-        default=None,
-        alias="Cf-Access-Jwt-Assertion",
-    ),
-):
+def get_authorized_user(
+    cf_access_jwt_assertion: str | None,
+    *,
+    require_admin: bool = False,
+) -> dict:
     email = get_verified_cloudflare_email(cf_access_jwt_assertion)
     user = get_user(email)
 
@@ -399,13 +429,135 @@ def auth_me(
             status_code=403,
             detail="このSW2.5ルールBotアカウントは無効化されています。",
         )
+    if require_admin and not user["is_admin"]:
+        raise HTTPException(
+            status_code=403,
+            detail="この操作には管理者権限が必要です。",
+        )
 
-    touch_user_last_seen(email)
+    return user
+
+
+def _admin_user_response(user: dict) -> AdminUserResponse:
+    return AdminUserResponse(
+        email=user["email"],
+        display_name=user["display_name"],
+        is_admin=bool(user["is_admin"]),
+        is_active=bool(user["is_active"]),
+        created_at=user["created_at"],
+        updated_at=user["updated_at"],
+        last_seen_at=user.get("last_seen_at"),
+    )
+
+
+@app.get("/auth/me", response_model=AuthMeResponse)
+def auth_me(
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    user = get_authorized_user(cf_access_jwt_assertion)
+    touch_user_last_seen(user["email"])
     return AuthMeResponse(
         email=user["email"],
         display_name=user["display_name"],
         is_admin=bool(user["is_admin"]),
     )
+
+
+@app.get("/admin/users", response_model=List[AdminUserResponse])
+def admin_list_users(
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    get_authorized_user(
+        cf_access_jwt_assertion,
+        require_admin=True,
+    )
+    return [_admin_user_response(user) for user in list_users()]
+
+
+@app.post("/admin/users", response_model=AdminUserResponse)
+def admin_create_user(
+    request: AdminUserCreateRequest,
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    get_authorized_user(
+        cf_access_jwt_assertion,
+        require_admin=True,
+    )
+    try:
+        user = create_user(
+            request.email,
+            request.display_name,
+            is_admin=request.is_admin,
+            is_active=request.is_active,
+        )
+    except UserAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except UserStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _admin_user_response(user)
+
+
+@app.put("/admin/users", response_model=AdminUserResponse)
+def admin_update_user(
+    request: AdminUserUpdateRequest,
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    actor = get_authorized_user(
+        cf_access_jwt_assertion,
+        require_admin=True,
+    )
+
+    actor_email = actor["email"].strip().lower()
+    target_email = request.current_email.strip().lower()
+    new_email = request.email.strip().lower()
+
+    if target_email == actor_email:
+        if new_email != actor_email:
+            raise HTTPException(
+                status_code=400,
+                detail="現在ログイン中の管理者自身のメールアドレスは変更できません。",
+            )
+        if not request.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail="現在ログイン中の管理者自身は無効化できません。",
+            )
+        if not request.is_admin:
+            raise HTTPException(
+                status_code=400,
+                detail="現在ログイン中の管理者自身の管理者権限は解除できません。",
+            )
+
+    try:
+        user = update_user(
+            request.current_email,
+            email=request.email,
+            display_name=request.display_name,
+            is_admin=request.is_admin,
+            is_active=request.is_active,
+        )
+    except UserAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LastAdminError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UserStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _admin_user_response(user)
 
 
 # ============================================================

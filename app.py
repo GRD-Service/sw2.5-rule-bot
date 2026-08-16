@@ -23,7 +23,9 @@ st.set_page_config(
 st.title("📚 ソード・ワールド2.5 ルールAI bot")
 
 API_URL = os.getenv("QA_API_URL", "http://localhost:8000/ask")
-AUTH_ME_URL = API_URL.rsplit("/", 1)[0] + "/auth/me"
+API_BASE_URL = API_URL.rsplit("/", 1)[0]
+AUTH_ME_URL = API_BASE_URL + "/auth/me"
+ADMIN_USERS_URL = API_BASE_URL + "/admin/users"
 DEFAULT_HYBRID_K = 20
 
 
@@ -67,6 +69,60 @@ def get_api_headers() -> dict[str, str]:
     return {"Cf-Access-Jwt-Assertion": token}
 
 
+def _api_error_detail(response: requests.Response, fallback: str) -> str:
+    try:
+        return response.json().get("detail") or fallback
+    except ValueError:
+        return fallback
+
+
+def get_admin_users() -> tuple[list[dict], str | None]:
+    try:
+        response = requests.get(
+            ADMIN_USERS_URL,
+            headers=get_api_headers(),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return [], f"ユーザー一覧の取得に失敗しました: {exc}"
+
+    if response.status_code != 200:
+        return [], _api_error_detail(response, "ユーザー一覧の取得に失敗しました。")
+    return response.json(), None
+
+
+def create_admin_user(payload: dict) -> str | None:
+    try:
+        response = requests.post(
+            ADMIN_USERS_URL,
+            headers=get_api_headers(),
+            json=payload,
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return f"ユーザー登録に失敗しました: {exc}"
+
+    if response.status_code != 200:
+        return _api_error_detail(response, "ユーザー登録に失敗しました。")
+    return None
+
+
+def update_admin_user(payload: dict) -> str | None:
+    try:
+        response = requests.put(
+            ADMIN_USERS_URL,
+            headers=get_api_headers(),
+            json=payload,
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return f"ユーザー更新に失敗しました: {exc}"
+
+    if response.status_code != 200:
+        return _api_error_detail(response, "ユーザー更新に失敗しました。")
+    return None
+
+
 authenticated_user, authentication_error = get_authenticated_user()
 
 if not authenticated_user:
@@ -78,6 +134,141 @@ display_name = authenticated_user.get("display_name") or authenticated_user["ema
 st.sidebar.success(
     f"認証ユーザー: {display_name}\n\n{authenticated_user['email']}"
 )
+
+if authenticated_user.get("is_admin"):
+    with st.sidebar.expander("⚙️ ユーザー管理", expanded=False):
+        admin_users, admin_users_error = get_admin_users()
+
+        if admin_users_error:
+            st.error(admin_users_error)
+        else:
+            st.caption(f"登録ユーザー: {len(admin_users)}人")
+
+            with st.form("admin_add_user_form", clear_on_submit=True):
+                st.markdown("**ユーザー追加**")
+                add_email = st.text_input(
+                    "メールアドレス",
+                    key="admin_add_email",
+                )
+                add_display_name = st.text_input(
+                    "表示名",
+                    key="admin_add_display_name",
+                )
+                add_is_admin = st.checkbox(
+                    "管理者",
+                    value=False,
+                    key="admin_add_is_admin",
+                )
+                add_is_active = st.checkbox(
+                    "有効",
+                    value=True,
+                    key="admin_add_is_active",
+                )
+                add_submitted = st.form_submit_button(
+                    "追加",
+                    use_container_width=True,
+                )
+
+            if add_submitted:
+                error = create_admin_user(
+                    {
+                        "email": add_email,
+                        "display_name": add_display_name,
+                        "is_admin": add_is_admin,
+                        "is_active": add_is_active,
+                    }
+                )
+                if error:
+                    st.error(error)
+                else:
+                    st.success("ユーザーを追加しました。")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("**登録済みユーザーの編集**")
+
+            if admin_users:
+                user_labels = {
+                    (
+                        f"{user.get('display_name') or user['email']} "
+                        f"<{user['email']}>"
+                    ): user
+                    for user in admin_users
+                }
+                selected_label = st.selectbox(
+                    "対象ユーザー",
+                    list(user_labels.keys()),
+                    key="admin_edit_user_select",
+                )
+                selected_user = user_labels[selected_label]
+                selected_email = selected_user["email"]
+                is_self = (
+                    selected_email.strip().lower()
+                    == authenticated_user["email"].strip().lower()
+                )
+
+                with st.form(f"admin_edit_user_form_{selected_email}"):
+                    edit_email = st.text_input(
+                        "メールアドレス",
+                        value=selected_user["email"],
+                        disabled=is_self,
+                    )
+                    edit_display_name = st.text_input(
+                        "表示名",
+                        value=selected_user.get("display_name") or "",
+                    )
+                    edit_is_admin = st.checkbox(
+                        "管理者",
+                        value=bool(selected_user.get("is_admin")),
+                        disabled=is_self,
+                    )
+                    edit_is_active = st.checkbox(
+                        "有効",
+                        value=bool(selected_user.get("is_active")),
+                        disabled=is_self,
+                    )
+
+                    if selected_user.get("last_seen_at"):
+                        st.caption(
+                            "最終アクセス: "
+                            + selected_user["last_seen_at"]
+                        )
+                    if is_self:
+                        st.caption(
+                            "ログイン中の管理者自身は、メール変更・無効化・"
+                            "管理者解除できません。"
+                        )
+
+                    edit_submitted = st.form_submit_button(
+                        "変更を保存",
+                        use_container_width=True,
+                    )
+
+                if edit_submitted:
+                    error = update_admin_user(
+                        {
+                            "current_email": selected_user["email"],
+                            "email": (
+                                selected_user["email"] if is_self else edit_email
+                            ),
+                            "display_name": edit_display_name,
+                            "is_admin": (
+                                bool(selected_user.get("is_admin"))
+                                if is_self
+                                else edit_is_admin
+                            ),
+                            "is_active": (
+                                bool(selected_user.get("is_active"))
+                                if is_self
+                                else edit_is_active
+                            ),
+                        }
+                    )
+                    if error:
+                        st.error(error)
+                    else:
+                        st.success("ユーザー情報を更新しました。")
+                        st.rerun()
 
 if "history" not in st.session_state:
     st.session_state.history = []
