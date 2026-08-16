@@ -113,6 +113,8 @@ def make_history_entry(question: str, result: dict) -> dict:
         "k_used": result.get("k_used", 0),
         "hybrid_k_used": result.get("hybrid_k_used", 0),
         "navigation_pages_used": result.get("navigation_pages_used", 0),
+        "structured_pages_used": result.get("structured_pages_used", 0),
+        "reference_pages_used": result.get("reference_pages_used", 0),
         "max_k": result.get("max_k", 100),
     }
 
@@ -122,6 +124,7 @@ def render_citation(citation: dict):
     pdf_link, image_link = get_citation_links(citation)
     reason = citation.get("reason") or ""
     excerpt = citation.get("excerpt") or ""
+    used_in_answer = citation.get("used_in_answer", True)
 
     safe_label = html.escape(label)
     safe_reason = html.escape(reason)
@@ -149,6 +152,19 @@ def render_citation(citation: dict):
             f"<a href='{html.escape(pdf_link)}' target='_blank'>PDFで開く</a>"
         )
 
+    if used_in_answer:
+        badge_html = (
+            "<span style='display:inline-block;padding:2px 7px;margin-left:6px;"
+            "font-size:0.78em;border-radius:10px;background:rgba(46,160,67,0.15);'>"
+            "回答で引用</span>"
+        )
+    else:
+        badge_html = (
+            "<span style='display:inline-block;padding:2px 7px;margin-left:6px;"
+            "font-size:0.78em;border-radius:10px;background:rgba(31,111,235,0.12);'>"
+            "関連資料</span>"
+        )
+
     reason_html = ""
     if safe_reason:
         reason_html = (
@@ -169,7 +185,7 @@ def render_citation(citation: dict):
 <div style="display:flex;gap:12px;align-items:flex-start;margin:10px 0 16px 0;">
   <div style="flex:0 0 auto;">{image_html}</div>
   <div style="flex:1;min-width:0;">
-    <div>{link_html}</div>
+    <div>{link_html}{badge_html}</div>
     <div style="font-size:0.90em;margin-top:2px;">{pdf_html}</div>
     {reason_html}
     {excerpt_html}
@@ -259,8 +275,10 @@ with st.expander("操作説明 (クリックして開く)"):
 
 ### ルールブックに基づく回答と出典
 - Vector/全文検索に加え、目次・索引を利用して関連ページを検索します。
-- 目次・索引で重要と判断されたページは、通常検索の `k` とは別枠で推論コンテキストへ追加されます。
-- 回答下部の出典一覧には、AIが回答中で実際に引用したページだけを表示します。
+- 「○頁参照」「次頁」など本文中の参照先も追跡します。
+- 「表」「テーブル」「一覧」などの質問では、複数書籍にある表本体を追加探索します。
+- 「槍→スピア」「流派→秘伝」のようなルール用語の検索展開も行います。
+- 出典欄には、AIが回答中で実際に引用したページに加え、表本体や参照先など調査価値の高い関連資料を少数表示します。
 
 ### 全文検索モード
 - 入力したキーワードが本文に出現するページを検索します。
@@ -442,12 +460,16 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
             context_k = int(entry.get("k_used", 0) or 0)
             hybrid_k = int(entry.get("hybrid_k_used", 0) or 0)
             nav_pages = int(entry.get("navigation_pages_used", 0) or 0)
+            structured_pages = int(entry.get("structured_pages_used", 0) or 0)
+            reference_pages = int(entry.get("reference_pages_used", 0) or 0)
             max_k = int(entry.get("max_k", 100) or 100)
 
             st.markdown(
                 f"📊 推論コンテキスト: **{context_k} chunks** / "
                 f"通常検索: **k={hybrid_k}** / "
-                f"navigation補完: **{nav_pages} pages**"
+                f"navigation: **{nav_pages} pages** / "
+                f"表・一覧: **{structured_pages} pages** / "
+                f"参照先: **{reference_pages} pages**"
             )
 
             if hybrid_k and hybrid_k < max_k:
@@ -459,12 +481,36 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
 
         citations = entry.get("citations", [])
         if citations:
-            st.markdown("**📖 回答で使用した出典:**")
-            for citation in citations:
-                try:
-                    render_citation(citation)
-                except Exception:
-                    st.markdown(f"- {citation}")
+            used_citations = [
+                citation
+                for citation in citations
+                if citation.get("used_in_answer", True)
+            ]
+            related_citations = [
+                citation
+                for citation in citations
+                if not citation.get("used_in_answer", True)
+            ]
+
+            if used_citations:
+                st.markdown("**📖 回答で使用した出典:**")
+                for citation in used_citations:
+                    try:
+                        render_citation(citation)
+                    except Exception:
+                        st.markdown(f"- {citation}")
+
+            if related_citations:
+                st.markdown("**🔎 あわせて確認したい関連資料:**")
+                st.caption(
+                    "回答本文では直接引用していませんが、表本体・参照先・別書籍の関連記述など、確認価値が高いページです。"
+                )
+                for citation in related_citations:
+                    try:
+                        render_citation(citation)
+                    except Exception:
+                        st.markdown(f"- {citation}")
+
         elif entry.get("sources"):
             st.markdown("**📖 出典:**")
             for src in entry["sources"]:
