@@ -813,7 +813,7 @@ def collapse_repeated_citations(answer: str) -> str:
         return answer
 
     lines = answer.splitlines()
-    citation_pattern = re.compile(r"(?:\s*\[C\d+\])+$")
+    citation_pattern = re.compile(r"(?:\s*\[C\d+\])+\s*$")
     citation_id_pattern = re.compile(r"\[C(\d+)\]")
 
     def line_citations(line: str) -> list[int]:

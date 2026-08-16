@@ -50,104 +50,71 @@ def load_book_categories():
         return {}
 
 
+# 正式書名 -> UI表示名。book_categories.json 読み込み後に構築する。
+book_display_name_map = {}
+
+
 def link_citation_markers(answer: str, citations: list) -> str:
     """
-    回答中の [C5] 等を、回答内での登場順に [1], [2] ... へ変換する。
+    回答中の [C5] 等を、book_categories.json の display_name と
+    書籍ページを使った短い表示へ変換する。
 
-    - 本文中では短い番号だけ表示する。
-    - 番号は画像ページへのリンクにする。
-    - 同じ Citation ID は常に同じ表示番号を使用する。
-    - citations に同一 ID が重複していても、最初の1件だけを採用する。
+    例:
+      [C5]  -> [ルールブック1 p.292]
+      [C13] -> [バトルマスタリー p.37]
+
+    - API/CLI内部の Citation ID は変更しない。
+    - GUI表示時だけ display_name + 論理ページへ変換する。
+    - 表示文字列全体を画像ページへのリンクにする。
+    - 画像リンクがなければ PDF リンクへフォールバックする。
+    - citations に同一 ID が重複していても最初の1件だけを採用する。
     """
     if not answer:
         return answer
 
-    # --------------------------------------------------------
-    # Citation ID -> citation
-    #
-    # setdefault() を使うことで、同じ id が複数返ってきても
-    # 1つの [C5] が複数出典へ展開されることを防ぐ。
-    # --------------------------------------------------------
-
     citation_map = {}
-
     for citation in citations:
         citation_id = citation.get("id")
-
         if citation_id is None:
             continue
-
         try:
             citation_id = int(citation_id)
         except (TypeError, ValueError):
             continue
-
-        citation_map.setdefault(
-            citation_id,
-            citation,
-        )
-
-    # --------------------------------------------------------
-    # 回答本文に実際に登場する順で番号を割り当てる。
-    #
-    # C5 -> 1
-    # C9 -> 2
-    # C4 -> 3
-    # --------------------------------------------------------
-
-    display_number_map = {}
-
-    for match in re.finditer(r"\[C(\d+)\]", answer):
-        citation_id = int(match.group(1))
-
-        if citation_id not in citation_map:
-            continue
-
-        if citation_id not in display_number_map:
-            display_number_map[citation_id] = (
-                len(display_number_map) + 1
-            )
-
-    # --------------------------------------------------------
-    # [C5] -> [1]
-    # --------------------------------------------------------
+        citation_map.setdefault(citation_id, citation)
 
     def replacer(match):
         citation_id = int(match.group(1))
-
         citation = citation_map.get(citation_id)
-        display_number = display_number_map.get(citation_id)
-
-        # 対応するCitationが存在しない場合は元の表記を残す。
-        if not citation or display_number is None:
+        if not citation:
             return match.group(0)
 
-        pdf_link, image_link = get_citation_links(citation)
+        book = citation.get("book") or ""
+        display_name = book_display_name_map.get(book, book or f"C{citation_id}")
+        page = citation.get("page")
 
-        # 本文から直接確認する場合は画像ページを優先。
+        if page is not None:
+            label = f"[{display_name} p.{page}]"
+        else:
+            label = f"[{display_name}]"
+
+        pdf_link, image_link = get_citation_links(citation)
         target_link = image_link or pdf_link
 
-        if target_link:
-            safe_link = html.escape(
-                target_link,
-                quote=True,
-            )
+        safe_label = html.escape(label)
+        if not target_link:
+            return safe_label
 
-            return (
-                f"<a href='{safe_link}' "
-                f"target='_blank' "
-                f"title='出典を開く'>"
-                f"[{display_number}]"
-                f"</a>"
-            )
+        safe_link = html.escape(target_link, quote=True)
+        return (
+            f"<a href='{safe_link}' "
+            f"target='_blank' "
+            f"title='出典を開く'>"
+            f"{safe_label}"
+            f"</a>"
+        )
 
-        return f"[{display_number}]"
-
-    return re.sub(
-        r"\[C(\d+)\]",
-        replacer,
-        answer,
-    )
+    return re.sub(r"\[C(\d+)\]", replacer, answer)
 
 
 model_prices = {
@@ -192,10 +159,7 @@ def make_history_entry(question: str, result: dict) -> dict:
     }
 
 
-def render_citation(
-    citation: dict,
-    display_number: int | None = None,
-):
+def render_citation(citation: dict):
     label = get_citation_label(citation)
     pdf_link, image_link = get_citation_links(citation)
     reason = citation.get("reason") or ""
@@ -210,11 +174,7 @@ def render_citation(
     link_html = safe_label
 
     if image_link:
-        safe_image_link = html.escape(
-            image_link,
-            quote=True,
-        )
-
+        safe_image_link = html.escape(image_link, quote=True)
         image_html = (
             f"<a href='{safe_image_link}' target='_blank'>"
             f"<img src='{safe_image_link}' "
@@ -223,7 +183,6 @@ def render_citation(
             f"border-radius:4px;'>"
             f"</a>"
         )
-
         link_html = (
             f"<a href='{safe_image_link}' "
             f"target='_blank' "
@@ -233,7 +192,6 @@ def render_citation(
         )
 
     pdf_html = ""
-
     if pdf_link:
         pdf_html = (
             f"<a href='{html.escape(pdf_link, quote=True)}' "
@@ -263,20 +221,7 @@ def render_citation(
             "</span>"
         )
 
-    number_html = ""
-
-    if display_number is not None:
-        number_html = (
-            "<span style='display:inline-block;"
-            "min-width:28px;"
-            "font-weight:700;"
-            "margin-right:6px;'>"
-            f"[{display_number}]"
-            "</span>"
-        )
-
     reason_html = ""
-
     if safe_reason:
         reason_html = (
             "<div style='font-size:0.90em;"
@@ -286,7 +231,6 @@ def render_citation(
         )
 
     excerpt_html = ""
-
     if safe_excerpt:
         excerpt_html = (
             "<div style='font-size:0.90em;"
@@ -301,7 +245,7 @@ def render_citation(
 <div style="display:flex;gap:12px;align-items:flex-start;margin:10px 0 16px 0;">
   <div style="flex:0 0 auto;">{image_html}</div>
   <div style="flex:1;min-width:0;">
-    <div>{number_html}{link_html}{badge_html}</div>
+    <div>{link_html}{badge_html}</div>
     <div style="font-size:0.90em;margin-top:2px;">{pdf_html}</div>
     {reason_html}
     {excerpt_html}
@@ -309,10 +253,7 @@ def render_citation(
 </div>
 """
 
-    st.markdown(
-        card,
-        unsafe_allow_html=True,
-    )
+    st.markdown(card, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -322,12 +263,19 @@ def render_citation(
 book_categories = load_book_categories()
 
 book_name_map = {}
+book_display_name_map.clear()
+
 for category, category_info in book_categories.items():
     for book_entry in category_info.get("books", []):
         full_name = book_entry["name"]
         display_name = book_entry.get("display_name", full_name)
+
+        # UIの書籍選択用: display_name / full_name -> full_name
         book_name_map[display_name] = full_name
         book_name_map[full_name] = full_name
+
+        # 回答本文のCitation表示用: full_name -> display_name
+        book_display_name_map[full_name] = display_name
 
 st.sidebar.header("🔍 検索条件")
 
@@ -601,24 +549,6 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
 
         citations = entry.get("citations", [])
         if citations:
-            # 回答本文に登場したCitationを、登場順に番号化する。
-            answer_citation_ids = []
-
-            for match in re.finditer(
-                r"\[C(\d+)\]",
-                entry.get("answer", ""),
-            ):
-                citation_id = int(match.group(1))
-
-                if citation_id not in answer_citation_ids:
-                    answer_citation_ids.append(citation_id)
-
-            citation_display_numbers = {
-                citation_id: index + 1
-                for index, citation_id
-                in enumerate(answer_citation_ids)
-            }
-
             used_citations = [
                 citation
                 for citation in citations
@@ -634,14 +564,7 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
                 st.markdown("**📖 回答で使用した出典:**")
                 for citation in used_citations:
                     try:
-                        render_citation(
-                            citation,
-                            citation_display_numbers.get(
-                                int(citation.get("id"))
-                            )
-                            if citation.get("id") is not None
-                            else None,
-                        )
+                        render_citation(citation)
                     except Exception:
                         st.markdown(f"- {citation}")
 
