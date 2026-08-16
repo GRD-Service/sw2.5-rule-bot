@@ -26,6 +26,7 @@ API_URL = os.getenv("QA_API_URL", "http://localhost:8000/ask")
 API_BASE_URL = API_URL.rsplit("/", 1)[0]
 AUTH_ME_URL = API_BASE_URL + "/auth/me"
 ADMIN_USERS_URL = API_BASE_URL + "/admin/users"
+CHATS_URL = API_BASE_URL + "/chats"
 DEFAULT_HYBRID_K = 20
 
 
@@ -120,6 +121,59 @@ def update_admin_user(payload: dict) -> str | None:
 
     if response.status_code != 200:
         return _api_error_detail(response, "ユーザー更新に失敗しました。")
+    return None
+
+
+def get_chats() -> tuple[list[dict], str | None]:
+    try:
+        response = requests.get(CHATS_URL, headers=get_api_headers(), timeout=15)
+    except requests.RequestException as exc:
+        return [], f"チャット一覧の取得に失敗しました: {exc}"
+    if response.status_code != 200:
+        return [], _api_error_detail(response, "チャット一覧の取得に失敗しました。")
+    return response.json(), None
+
+
+def create_chat() -> tuple[dict | None, str | None]:
+    try:
+        response = requests.post(
+            CHATS_URL,
+            headers=get_api_headers(),
+            json={"title": ""},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return None, f"チャットの作成に失敗しました: {exc}"
+    if response.status_code != 200:
+        return None, _api_error_detail(response, "チャットの作成に失敗しました。")
+    return response.json(), None
+
+
+def get_chat_detail(chat_id: str) -> tuple[dict | None, str | None]:
+    try:
+        response = requests.get(
+            f"{CHATS_URL}/{chat_id}",
+            headers=get_api_headers(),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return None, f"チャットの取得に失敗しました: {exc}"
+    if response.status_code != 200:
+        return None, _api_error_detail(response, "チャットの取得に失敗しました。")
+    return response.json(), None
+
+
+def delete_chat(chat_id: str) -> str | None:
+    try:
+        response = requests.delete(
+            f"{CHATS_URL}/{chat_id}",
+            headers=get_api_headers(),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return f"チャットの削除に失敗しました: {exc}"
+    if response.status_code != 200:
+        return _api_error_detail(response, "チャットの削除に失敗しました。")
     return None
 
 
@@ -254,14 +308,72 @@ if authenticated_user.get("is_admin"):
                         st.success("ユーザー情報を更新しました。")
                         st.rerun()
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+st.sidebar.markdown("---")
+st.sidebar.subheader("💬 チャット")
+
+if st.sidebar.button("＋ 新しいチャット", use_container_width=True):
+    new_chat, error = create_chat()
+    if error:
+        st.sidebar.error(error)
+    elif new_chat:
+        st.session_state.current_chat_id = new_chat["id"]
+        st.rerun()
+
+chat_list, chat_list_error = get_chats()
+if chat_list_error:
+    st.sidebar.error(chat_list_error)
+    chat_list = []
+
+valid_chat_ids = {chat["id"] for chat in chat_list}
+if st.session_state.get("current_chat_id") not in valid_chat_ids:
+    st.session_state.current_chat_id = chat_list[0]["id"] if chat_list else None
+
+if not st.session_state.get("current_chat_id"):
+    new_chat, error = create_chat()
+    if error:
+        st.error(error)
+        st.stop()
+    st.session_state.current_chat_id = new_chat["id"]
+    st.rerun()
+
+for chat in chat_list:
+    title = chat.get("title") or "新しいチャット"
+    active = chat["id"] == st.session_state.current_chat_id
+    label = ("● " if active else "") + title
+    if st.sidebar.button(
+        label,
+        key=f"chat_select_{chat['id']}",
+        use_container_width=True,
+    ):
+        st.session_state.current_chat_id = chat["id"]
+        st.rerun()
+
+current_chat, current_chat_error = get_chat_detail(
+    st.session_state.current_chat_id
+)
+if current_chat_error:
+    st.error(current_chat_error)
+    st.stop()
+
+with st.sidebar.expander("現在のチャット", expanded=False):
+    st.caption(current_chat.get("title") or "新しいチャット")
+    if st.button(
+        "このチャットを削除",
+        key="delete_current_chat",
+        use_container_width=True,
+    ):
+        error = delete_chat(st.session_state.current_chat_id)
+        if error:
+            st.error(error)
+        else:
+            st.session_state.current_chat_id = None
+            st.rerun()
+
+
 if "question_submitted" not in st.session_state:
     st.session_state.question_submitted = False
-if "drilldown_active" not in st.session_state:
-    st.session_state.drilldown_active = False
-if "drilldown_history" not in st.session_state:
-    st.session_state.drilldown_history = []
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = None
 
 
 # ============================================================
@@ -372,50 +484,6 @@ def calculate_price(model, token_usage):
         * ratio
     )
     return input_price, output_price, input_price + output_price
-
-
-def make_history_entry(
-    question: str,
-    result: dict,
-    *,
-    mode: str,
-    conversation_before: list | None = None,
-) -> dict:
-    conversation_before = list(conversation_before or [])
-    conversation_after = conversation_before + [
-        {"role": "user", "content": question},
-        {"role": "assistant", "content": result.get("answer", "")},
-    ]
-    return {
-        "id": len(st.session_state.history),
-        "question": question,
-        "answer": result.get("answer", ""),
-        "mode": mode,
-        "conversation_before": conversation_before,
-        "conversation_after": conversation_after,
-        "citations": result.get("citations", []),
-        "sources": result.get("sources", []),
-        "model_used": result.get("model_used"),
-        "token_usage": result.get("token_usage", {}),
-        "k_used": result.get("k_used", 0),
-        "hybrid_k_used": result.get("hybrid_k_used", 0),
-        "navigation_pages_used": result.get("navigation_pages_used", 0),
-        "structured_pages_used": result.get("structured_pages_used", 0),
-        "reference_pages_used": result.get("reference_pages_used", 0),
-        "max_k": result.get("max_k", 100),
-    }
-
-
-def activate_drilldown(entry: dict):
-    st.session_state.drilldown_active = True
-    st.session_state.drilldown_history = list(
-        entry.get("conversation_after", [])
-    )
-
-
-def stop_drilldown():
-    st.session_state.drilldown_active = False
-    st.session_state.drilldown_history = []
 
 
 def render_citation(citation: dict):
@@ -587,19 +655,6 @@ for category, category_info in book_categories.items():
 # Question form
 # ============================================================
 
-if st.session_state.get("drilldown_active"):
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        st.info(
-            "💬 掘り下げ中です。次の質問では、この会話の履歴を参照します。"
-        )
-    with col2:
-        st.button(
-            "掘り下げを終了",
-            on_click=stop_drilldown,
-            use_container_width=True,
-        )
-
 with st.form("question_form"):
     question = st.text_input(
         "質問",
@@ -644,9 +699,10 @@ with st.expander("操作説明 (クリックして開く)"):
 2. 回答モードを選択してください。
 3. 必要に応じて検索対象の書籍を選択してください。
 4. 「質問する」をクリックすると、回答と出典が表示されます。
-5. AI回答をさらに確認したい場合は、回答欄の **「この内容について掘り下げる」** をクリックしてください。
-6. 掘り下げ中は、その回答を起点とした会話履歴を参照して次の質問に回答します。
-7. 出典には、書籍ページ・選定理由・該当箇所の抜粋・画像/PDFリンクを表示します。
+5. 同じチャットで質問を続けると、過去の会話と参照資料を踏まえて回答します。
+6. 左側のチャット履歴から以前の調査を開き直して、その続きを質問できます。
+7. 別テーマとして分けたい場合は「＋ 新しいチャット」を使用してください。
+8. 出典には、書籍ページ・選定理由・該当箇所の抜粋・画像/PDFリンクを表示します。
 
 ## 各モード
 
@@ -656,7 +712,7 @@ with st.expander("操作説明 (クリックして開く)"):
 - 「表」「テーブル」「一覧」などの質問では、複数書籍にある表本体を追加探索します。
 - 「槍→スピア」「流派→秘伝」のようなルール用語の検索展開も行います。
 - 出典欄には、AIが回答中で実際に引用したページに加え、表本体や参照先など調査価値の高い関連資料を少数表示します。
-- 「この内容について掘り下げる」を使用すると、会話履歴を踏まえて追加質問できます。
+- 同一チャットでは、会話履歴と過去に参照した資料を保持しながら追加質問できます。
 
 ### 全文検索モード
 - 入力したキーワードが本文に出現するページを検索します。
@@ -683,15 +739,6 @@ if st.session_state.get("question_submitted"):
         with st.spinner("AIが調査中です..."):
             try:
                 current_mode = st.session_state.get("mode", "rules_strict")
-                conversation_history = (
-                    list(st.session_state.get("drilldown_history", []))
-                    if (
-                        st.session_state.get("drilldown_active")
-                        and current_mode != "exact_search"
-                    )
-                    else []
-                )
-
                 response = requests.post(
                     API_URL,
                     headers=get_api_headers(),
@@ -701,32 +748,21 @@ if st.session_state.get("question_submitted"):
                         "model": selected_model,
                         "mode": current_mode,
                         "k": DEFAULT_HYBRID_K,
-                        "history": conversation_history,
+                        "chat_id": st.session_state.current_chat_id,
                     },
                     timeout=180,
                 )
 
                 if response.status_code == 200:
-                    result = response.json()
-                    entry = make_history_entry(
-                        current_question,
-                        result,
-                        mode=current_mode,
-                        conversation_before=conversation_history,
-                    )
-                    st.session_state.history.append(entry)
-
-                    if (
-                        st.session_state.get("drilldown_active")
-                        and current_mode != "exact_search"
-                    ):
-                        st.session_state.drilldown_history = list(
-                            entry["conversation_after"]
-                        )
+                    # 回答と出典はAPI側でチャットDBへ保存済み。
+                    st.session_state.question_submitted = False
+                    st.rerun()
                 else:
                     st.error(
-                        "APIからの応答に失敗しました。"
-                        f"コード: {response.status_code}"
+                        _api_error_detail(
+                            response,
+                            f"APIからの応答に失敗しました。コード: {response.status_code}",
+                        )
                     )
             except Exception as exc:
                 st.error(f"エラーが発生しました: {exc}")
@@ -735,24 +771,37 @@ if st.session_state.get("question_submitted"):
 
 
 # ============================================================
-# History display
+# Chat history display
 # ============================================================
 
-for idx, entry in enumerate(reversed(st.session_state.history)):
-    with st.chat_message("Q"):
-        st.markdown(entry["question"])
+# API応答後やチャット切替後の最新状態を取得する。
+current_chat, current_chat_error = get_chat_detail(st.session_state.current_chat_id)
+if current_chat_error:
+    st.error(current_chat_error)
+    st.stop()
 
-    with st.chat_message("A"):
+st.caption(f"チャット: {current_chat.get('title') or '新しいチャット'}")
+
+messages = current_chat.get("messages", [])
+for message in messages:
+    role = message.get("role")
+    if role == "user":
+        with st.chat_message("user"):
+            st.markdown(message.get("content", ""))
+        continue
+
+    metadata = message.get("metadata") or {}
+    with st.chat_message("assistant"):
         display_text = link_citation_markers(
-            entry["answer"],
-            entry.get("citations", []),
+            message.get("content", ""),
+            metadata.get("citations", []),
         )
 
-        if entry.get("model_used"):
-            display_text += f"\n\n🔧 使用モデル: `{entry['model_used']}`"
+        if metadata.get("model_used"):
+            display_text += f"\n\n🔧 使用モデル: `{metadata['model_used']}`"
 
-        if entry.get("token_usage"):
-            tokens = entry["token_usage"]
+        if metadata.get("token_usage"):
+            tokens = metadata["token_usage"]
             display_text += (
                 "\n\n🧮 トークン数: "
                 f"入力 {tokens.get('prompt_tokens', 0)}, "
@@ -760,7 +809,7 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
                 f"合計 {tokens.get('total_tokens', 0)}"
             )
             input_price, output_price, total_price = calculate_price(
-                entry.get("model_used"),
+                metadata.get("model_used"),
                 tokens,
             )
             display_text += (
@@ -772,13 +821,12 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
 
         st.markdown(display_text, unsafe_allow_html=True)
 
-        if entry.get("model_used") != "AIは使用していません":
-            context_k = int(entry.get("k_used", 0) or 0)
-            hybrid_k = int(entry.get("hybrid_k_used", 0) or 0)
-            nav_pages = int(entry.get("navigation_pages_used", 0) or 0)
-            structured_pages = int(entry.get("structured_pages_used", 0) or 0)
-            reference_pages = int(entry.get("reference_pages_used", 0) or 0)
-
+        if metadata.get("model_used") != "AIは使用していません":
+            context_k = int(metadata.get("k_used", 0) or 0)
+            hybrid_k = int(metadata.get("hybrid_k_used", 0) or 0)
+            nav_pages = int(metadata.get("navigation_pages_used", 0) or 0)
+            structured_pages = int(metadata.get("structured_pages_used", 0) or 0)
+            reference_pages = int(metadata.get("reference_pages_used", 0) or 0)
             st.markdown(
                 f"📊 推論コンテキスト: **{context_k} chunks** / "
                 f"通常検索: **k={hybrid_k}** / "
@@ -787,59 +835,31 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
                 f"参照先: **{reference_pages} pages**"
             )
 
-            st.button(
-                "💬 この内容について掘り下げる",
-                key=f"drilldown_{entry.get('id', idx)}",
-                on_click=activate_drilldown,
-                args=(entry,),
-            )
-
-        citations = entry.get("citations", [])
+        citations = metadata.get("citations", [])
         if citations:
             used_citations = [
-                citation
-                for citation in citations
+                citation for citation in citations
                 if citation.get("used_in_answer", True)
             ]
             related_citations = [
-                citation
-                for citation in citations
+                citation for citation in citations
                 if not citation.get("used_in_answer", True)
             ]
 
             if used_citations:
                 st.markdown("**📖 回答で使用した出典:**")
                 for citation in used_citations:
-                    try:
-                        render_citation(citation)
-                    except Exception:
-                        st.markdown(f"- {citation}")
+                    render_citation(citation)
 
             if related_citations:
                 st.markdown("**🔎 あわせて確認したい関連資料:**")
                 st.caption(
-                    "回答本文では直接引用していませんが、表本体・参照先・別書籍の関連記述など、確認価値が高いページです。"
+                    "回答本文では直接引用していませんが、確認価値が高い関連ページです。"
                 )
                 for citation in related_citations:
-                    try:
-                        render_citation(citation)
-                    except Exception:
-                        st.markdown(f"- {citation}")
-
-        elif entry.get("sources"):
+                    render_citation(citation)
+        elif metadata.get("sources"):
             st.markdown("**📖 出典:**")
-            for src in entry["sources"]:
-                st.markdown(f"- {src}")
+            for source in metadata["sources"]:
+                st.markdown(f"- {source}")
 
-        st.markdown("---")
-
-
-# ============================================================
-# Clear history
-# ============================================================
-
-st.sidebar.markdown("---")
-if st.sidebar.button("🧹 履歴をクリア"):
-    st.session_state.history.clear()
-    stop_drilldown()
-    st.rerun()

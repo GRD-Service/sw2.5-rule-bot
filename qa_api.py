@@ -19,6 +19,18 @@ from cloudflare_auth import (
     CloudflareAccessError,
     verify_cloudflare_access_token,
 )
+from chat_store import (
+    ChatStoreError,
+    create_chat,
+    delete_chat,
+    get_chat,
+    get_messages,
+    get_sources,
+    init_chat_store,
+    list_chats,
+    rename_chat,
+    save_turn,
+)
 from user_store import (
     LastAdminError,
     UserAlreadyExistsError,
@@ -108,6 +120,7 @@ NAVIGATION_REQUIRED = os.getenv("NAVIGATION_REQUIRED", "1").strip().lower() in {
 
 
 init_user_store()
+init_chat_store()
 
 
 # ============================================================
@@ -331,6 +344,7 @@ class QueryRequest(BaseModel):
     k: Optional[int] = 20
     mode: Optional[str] = "rules_strict"
     history: Optional[List[ChatMessage]] = None
+    chat_id: Optional[str] = None
 
 
 class Citation(BaseModel):
@@ -357,6 +371,46 @@ class QueryResponse(BaseModel):
     reference_pages_used: Optional[int] = None
     max_k: Optional[int] = None
     token_usage: Optional[dict] = None
+
+
+class ChatCreateRequest(BaseModel):
+    title: str = ""
+
+
+class ChatRenameRequest(BaseModel):
+    title: str
+
+
+class ChatSummaryResponse(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class StoredMessageResponse(BaseModel):
+    id: int
+    role: str
+    content: str
+    metadata: dict = Field(default_factory=dict)
+    created_at: str
+
+
+class StoredSourceResponse(BaseModel):
+    book: str
+    pdf_page: int
+    logical_page: Optional[int] = None
+    first_seen_at: str
+    last_used_at: str
+
+
+class ChatDetailResponse(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    messages: List[StoredMessageResponse] = Field(default_factory=list)
+    sources: List[StoredSourceResponse] = Field(default_factory=list)
 
 
 # ============================================================
@@ -547,6 +601,100 @@ def admin_update_user(
 
 
 # ============================================================
+# Chat persistence
+# ============================================================
+
+
+def _chat_summary(chat: dict) -> ChatSummaryResponse:
+    return ChatSummaryResponse(
+        id=chat["id"],
+        title=chat["title"],
+        created_at=chat["created_at"],
+        updated_at=chat["updated_at"],
+    )
+
+
+@app.get("/chats", response_model=List[ChatSummaryResponse])
+def chat_list(
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    user = get_authorized_user(cf_access_jwt_assertion)
+    return [_chat_summary(chat) for chat in list_chats(user["email"])]
+
+
+@app.post("/chats", response_model=ChatSummaryResponse)
+def chat_create(
+    request: ChatCreateRequest,
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    user = get_authorized_user(cf_access_jwt_assertion)
+    try:
+        return _chat_summary(create_chat(user["email"], request.title))
+    except ChatStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/chats/{chat_id}", response_model=ChatDetailResponse)
+def chat_detail(
+    chat_id: str,
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    user = get_authorized_user(cf_access_jwt_assertion)
+    chat = get_chat(chat_id, user["email"])
+    if chat is None:
+        raise HTTPException(status_code=404, detail="チャットが見つかりません。")
+    return ChatDetailResponse(
+        id=chat["id"],
+        title=chat["title"],
+        created_at=chat["created_at"],
+        updated_at=chat["updated_at"],
+        messages=get_messages(chat_id, user["email"]),
+        sources=get_sources(chat_id, user["email"]),
+    )
+
+
+@app.put("/chats/{chat_id}", response_model=ChatSummaryResponse)
+def chat_rename(
+    chat_id: str,
+    request: ChatRenameRequest,
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    user = get_authorized_user(cf_access_jwt_assertion)
+    try:
+        return _chat_summary(rename_chat(chat_id, user["email"], request.title))
+    except ChatStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/chats/{chat_id}")
+def chat_delete(
+    chat_id: str,
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
+    user = get_authorized_user(cf_access_jwt_assertion)
+    try:
+        delete_chat(chat_id, user["email"])
+    except ChatStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+# ============================================================
 # Prompt
 # ============================================================
 
@@ -631,25 +779,27 @@ def build_contextual_search_question(
     question: str,
     history: list[dict],
 ) -> str:
-    """
-    掘り下げ質問の「それ」「その場合」などを検索しやすくする。
+    """指示語を含む追質問だけ直前のユーザー質問で補う。"""
+    current = str(question or "").strip()
+    if not current:
+        return current
 
-    AI回答本文は検索語へ混ぜず、直近のユーザー質問だけを補助文脈として使う。
-    """
+    referential_terms = (
+        "それ", "その", "これ", "この", "あれ", "あの",
+        "前述", "上記", "先ほど", "さっき", "場合",
+    )
+    if not any(term in current for term in referential_terms):
+        return current
+
     previous_questions = [
         message["content"]
         for message in history
-        if message["role"] == "user"
-    ][-3:]
-
+        if message["role"] == "user" and message.get("content")
+    ]
     if not previous_questions:
-        return question
+        return current
 
-    parts = previous_questions + [question]
-    search_question = "\n".join(
-        part.strip() for part in parts if part and part.strip()
-    )
-    return search_question[-1600:]
+    return f"{previous_questions[-1]}\n{current}"[-1600:]
 
 
 # ============================================================
@@ -2151,6 +2301,78 @@ def build_context_items(
     return selected, reference_pages
 
 
+def build_chat_memory_items(
+    remembered_sources: list[dict],
+    question: str,
+    books: Optional[List[str]],
+    max_docs: int = 8,
+) -> list[dict]:
+    """過去ターンで使ったページから、今回の質問に近いchunkを再選別する。"""
+    candidates = []
+    for source in remembered_sources:
+        book = source.get("book")
+        pdf_page = source.get("pdf_page")
+        if not book or pdf_page is None:
+            continue
+        if books and book not in books:
+            continue
+        try:
+            pdf_page = int(pdf_page)
+        except (TypeError, ValueError):
+            continue
+        docs = page_documents_by_pdf.get((book, pdf_page), [])
+        for doc in docs:
+            relevance = chunk_relevance_score(
+                doc,
+                question,
+                extra_terms=extract_query_terms(question),
+            )
+            candidates.append(
+                {
+                    "doc": doc,
+                    "mandatory": False,
+                    "context_score": 180.0 + relevance,
+                    "reason": "このチャットで以前参照した資料",
+                    "source": "chat_memory",
+                }
+            )
+
+    candidates.sort(key=lambda item: item["context_score"], reverse=True)
+    result = []
+    seen_pages = set()
+    for item in candidates:
+        doc = item["doc"]
+        page_key = (doc.metadata.get("book"), get_pdf_page(doc))
+        if page_key in seen_pages:
+            continue
+        seen_pages.add(page_key)
+        result.append(item)
+        if len(result) >= max_docs:
+            break
+    return result
+
+
+def merge_chat_memory_items(
+    context_items: list[dict],
+    memory_items: list[dict],
+) -> list[dict]:
+    # 新規検索結果を主役にしつつ、過去資料を最大8件まで補助コンテキストへ戻す。
+    selected = []
+    seen = set()
+    # 現在の検索結果を最大20件確保し、残りを過去資料に使う。
+    # これにより通常検索が上限まで埋まってもチャットメモリが消えない。
+    ordered_items = context_items[:20] + memory_items + context_items[20:]
+    for item in ordered_items:
+        key = document_key(item["doc"])
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+        if len(selected) >= CONTEXT_MAX_DOCS:
+            break
+    return selected
+
+
 # ============================================================
 # Exact-search helpers
 # ============================================================
@@ -2193,7 +2415,13 @@ def build_exact_search_items(results, question: str) -> list[dict]:
 
 
 @app.post("/ask", response_model=QueryResponse)
-def ask_question(request: QueryRequest):
+def ask_question(
+    request: QueryRequest,
+    cf_access_jwt_assertion: str | None = Header(
+        default=None,
+        alias="Cf-Access-Jwt-Assertion",
+    ),
+):
     question = request.question
     books = request.books
     model_name = request.model or "gpt-5.4-nano"
@@ -2201,7 +2429,23 @@ def ask_question(request: QueryRequest):
     initial_k = max(1, int(request.k or 20))
     max_k = HYBRID_CANDIDATE_K
 
-    conversation_history = normalize_chat_history(request.history)
+    chat_user = None
+    remembered_sources = []
+    if request.chat_id:
+        chat_user = get_authorized_user(cf_access_jwt_assertion)
+        chat = get_chat(request.chat_id, chat_user["email"])
+        if chat is None:
+            raise HTTPException(status_code=404, detail="チャットが見つかりません。")
+        stored_messages = get_messages(request.chat_id, chat_user["email"])
+        request_history = [
+            {"role": item["role"], "content": item["content"]}
+            for item in stored_messages
+        ]
+        remembered_sources = get_sources(request.chat_id, chat_user["email"])
+    else:
+        request_history = request.history
+
+    conversation_history = normalize_chat_history(request_history)
     conversation_history_text = format_conversation_history(
         conversation_history
     )
@@ -2209,6 +2453,25 @@ def ask_question(request: QueryRequest):
         question,
         conversation_history,
     )
+
+    def finalize_response(result: QueryResponse) -> QueryResponse:
+        if request.chat_id and chat_user is not None:
+            try:
+                metadata = result.model_dump()
+                save_turn(
+                    request.chat_id,
+                    chat_user["email"],
+                    question,
+                    result.answer,
+                    metadata=metadata,
+                    citations=[citation.model_dump() for citation in result.citations],
+                )
+            except ChatStoreError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"チャット履歴の保存に失敗しました: {exc}",
+                ) from exc
+        return result
 
     if mode == "free_chat":
         system_prompt = (
@@ -2224,7 +2487,7 @@ def ask_question(request: QueryRequest):
                 messages.append(AIMessage(content=message["content"]))
         messages.append(HumanMessage(content=question))
         response = llm.invoke(messages)
-        return QueryResponse(
+        return finalize_response(QueryResponse(
             answer=response.content,
             citations=[],
             sources=[],
@@ -2236,7 +2499,7 @@ def ask_question(request: QueryRequest):
             reference_pages_used=0,
             max_k=0,
             token_usage=response.response_metadata.get("token_usage", {}),
-        )
+        ))
 
     if mode == "exact_search":
         keywords = question.strip().split()
@@ -2258,7 +2521,7 @@ def ask_question(request: QueryRequest):
             if sources
             else "該当はありませんでした。"
         )
-        return QueryResponse(
+        return finalize_response(QueryResponse(
             answer=answer,
             citations=citations,
             sources=sources,
@@ -2270,7 +2533,7 @@ def ask_question(request: QueryRequest):
             reference_pages_used=0,
             max_k=0,
             token_usage={},
-        )
+        ))
 
     # rules_strict
     # 掘り下げ時は直近のユーザー質問も検索文脈へ含める。
@@ -2302,8 +2565,15 @@ def ask_question(request: QueryRequest):
         hybrid_items=hybrid_items,
     )
 
+    memory_items = build_chat_memory_items(
+        remembered_sources,
+        search_question,
+        books,
+    )
+    context_items = merge_chat_memory_items(context_items, memory_items)
+
     if not context_items:
-        return QueryResponse(
+        return finalize_response(QueryResponse(
             answer="該当する情報が見つかりませんでした。",
             citations=[],
             sources=[],
@@ -2315,7 +2585,7 @@ def ask_question(request: QueryRequest):
             reference_pages_used=0,
             max_k=max_k,
             token_usage={},
-        )
+        ))
 
     citations = build_citations(context_items, search_question)
     citation_id_map = {
@@ -2370,7 +2640,7 @@ def ask_question(request: QueryRequest):
     )
     sources = citations_to_legacy_sources(returned_citations)
 
-    return QueryResponse(
+    return finalize_response(QueryResponse(
         answer=answer,
         citations=returned_citations,
         sources=sources,
@@ -2382,4 +2652,4 @@ def ask_question(request: QueryRequest):
         reference_pages_used=len(reference_pages),
         max_k=max_k,
         token_usage=response.response_metadata.get("token_usage", {}),
-    )
+    ))
