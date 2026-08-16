@@ -25,6 +25,7 @@ from user_store import (
     UserNotFoundError,
     UserStoreError,
     create_user,
+    ensure_user,
     get_user,
     init_user_store,
     list_users,
@@ -373,7 +374,6 @@ class AdminUserResponse(BaseModel):
     email: str
     display_name: str
     is_admin: bool
-    is_active: bool
     created_at: str
     updated_at: str
     last_seen_at: Optional[str] = None
@@ -383,7 +383,6 @@ class AdminUserCreateRequest(BaseModel):
     email: str
     display_name: str = ""
     is_admin: bool = False
-    is_active: bool = True
 
 
 class AdminUserUpdateRequest(BaseModel):
@@ -391,7 +390,6 @@ class AdminUserUpdateRequest(BaseModel):
     email: str
     display_name: str = ""
     is_admin: bool = False
-    is_active: bool = True
 
 
 def get_verified_cloudflare_email(
@@ -417,18 +415,13 @@ def get_authorized_user(
     require_admin: bool = False,
 ) -> dict:
     email = get_verified_cloudflare_email(cf_access_jwt_assertion)
-    user = get_user(email)
-
-    if user is None:
+    try:
+        user = ensure_user(email)
+    except UserStoreError as exc:
         raise HTTPException(
-            status_code=403,
-            detail="このCloudflareアカウントはSW2.5ルールBotに登録されていません。",
-        )
-    if not user["is_active"]:
-        raise HTTPException(
-            status_code=403,
-            detail="このSW2.5ルールBotアカウントは無効化されています。",
-        )
+            status_code=500,
+            detail=f"ユーザー情報の初期化に失敗しました: {exc}",
+        ) from exc
     if require_admin and not user["is_admin"]:
         raise HTTPException(
             status_code=403,
@@ -443,7 +436,6 @@ def _admin_user_response(user: dict) -> AdminUserResponse:
         email=user["email"],
         display_name=user["display_name"],
         is_admin=bool(user["is_admin"]),
-        is_active=bool(user["is_active"]),
         created_at=user["created_at"],
         updated_at=user["updated_at"],
         last_seen_at=user.get("last_seen_at"),
@@ -497,7 +489,7 @@ def admin_create_user(
             request.email,
             request.display_name,
             is_admin=request.is_admin,
-            is_active=request.is_active,
+            is_active=True,
         )
     except UserAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -529,11 +521,6 @@ def admin_update_user(
                 status_code=400,
                 detail="現在ログイン中の管理者自身のメールアドレスは変更できません。",
             )
-        if not request.is_active:
-            raise HTTPException(
-                status_code=400,
-                detail="現在ログイン中の管理者自身は無効化できません。",
-            )
         if not request.is_admin:
             raise HTTPException(
                 status_code=400,
@@ -546,7 +533,6 @@ def admin_update_user(
             email=request.email,
             display_name=request.display_name,
             is_admin=request.is_admin,
-            is_active=request.is_active,
         )
     except UserAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

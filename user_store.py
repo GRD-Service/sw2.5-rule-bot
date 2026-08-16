@@ -205,13 +205,46 @@ def create_user(
     return user
 
 
+def ensure_user(email: str) -> dict:
+    """Cloudflare Accessで認証済みのユーザーを必要なら自動登録する。"""
+    normalized = _normalize_email(email)
+    if not normalized or "@" not in normalized:
+        raise UserStoreError("有効なメールアドレスを指定してください。")
+
+    existing = get_user(normalized)
+    if existing is not None:
+        return existing
+
+    display_name = normalized.split("@", 1)[0]
+    now = _utc_now()
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO users (
+                email,
+                display_name,
+                is_admin,
+                is_active,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, 0, 1, ?, ?)
+            """,
+            (normalized, display_name, now, now),
+        )
+
+    user = get_user(normalized)
+    if user is None:
+        raise UserStoreError("ユーザーの自動登録後確認に失敗しました。")
+    return user
+
+
 def update_user(
     current_email: str,
     *,
     email: str,
     display_name: str,
     is_admin: bool,
-    is_active: bool,
 ) -> dict:
     current_normalized = _normalize_email(current_email)
     new_normalized = _normalize_email(email)
@@ -230,7 +263,7 @@ def update_user(
     with _connect() as connection:
         current = connection.execute(
             """
-            SELECT email, is_admin, is_active
+            SELECT email, is_admin
             FROM users
             WHERE email = ? COLLATE NOCASE
             """,
@@ -240,20 +273,20 @@ def update_user(
         if current is None:
             raise UserNotFoundError("更新対象のユーザーが見つかりません。")
 
-        was_active_admin = bool(current["is_admin"] and current["is_active"])
-        will_be_active_admin = bool(is_admin and is_active)
+        was_admin = bool(current["is_admin"])
+        will_be_admin = bool(is_admin)
 
-        if was_active_admin and not will_be_active_admin:
-            active_admin_count = connection.execute(
+        if was_admin and not will_be_admin:
+            admin_count = connection.execute(
                 """
                 SELECT COUNT(*) AS count
                 FROM users
-                WHERE is_admin = 1 AND is_active = 1
+                WHERE is_admin = 1
                 """
             ).fetchone()["count"]
-            if active_admin_count <= 1:
+            if admin_count <= 1:
                 raise LastAdminError(
-                    "最後の有効な管理者は無効化または管理者解除できません。"
+                    "最後の管理者は管理者解除できません。"
                 )
 
         if new_normalized != current_normalized:
@@ -277,7 +310,6 @@ def update_user(
                 email = ?,
                 display_name = ?,
                 is_admin = ?,
-                is_active = ?,
                 updated_at = ?
             WHERE email = ? COLLATE NOCASE
             """,
@@ -285,7 +317,6 @@ def update_user(
                 new_normalized,
                 display_name,
                 int(bool(is_admin)),
-                int(bool(is_active)),
                 now,
                 current_normalized,
             ),

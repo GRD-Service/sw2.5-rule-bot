@@ -143,6 +143,7 @@ if authenticated_user.get("is_admin"):
             st.error(admin_users_error)
         else:
             st.caption(f"登録ユーザー: {len(admin_users)}人")
+            st.caption("Cloudflare Accessで認証された未登録ユーザーは初回アクセス時に自動登録されます。")
 
             with st.form("admin_add_user_form", clear_on_submit=True):
                 st.markdown("**ユーザー追加**")
@@ -159,11 +160,6 @@ if authenticated_user.get("is_admin"):
                     value=False,
                     key="admin_add_is_admin",
                 )
-                add_is_active = st.checkbox(
-                    "有効",
-                    value=True,
-                    key="admin_add_is_active",
-                )
                 add_submitted = st.form_submit_button(
                     "追加",
                     use_container_width=True,
@@ -175,7 +171,6 @@ if authenticated_user.get("is_admin"):
                         "email": add_email,
                         "display_name": add_display_name,
                         "is_admin": add_is_admin,
-                        "is_active": add_is_active,
                     }
                 )
                 if error:
@@ -222,12 +217,6 @@ if authenticated_user.get("is_admin"):
                         value=bool(selected_user.get("is_admin")),
                         disabled=is_self,
                     )
-                    edit_is_active = st.checkbox(
-                        "有効",
-                        value=bool(selected_user.get("is_active")),
-                        disabled=is_self,
-                    )
-
                     if selected_user.get("last_seen_at"):
                         st.caption(
                             "最終アクセス: "
@@ -235,7 +224,7 @@ if authenticated_user.get("is_admin"):
                         )
                     if is_self:
                         st.caption(
-                            "ログイン中の管理者自身は、メール変更・無効化・"
+                            "ログイン中の管理者自身は、メール変更・"
                             "管理者解除できません。"
                         )
 
@@ -256,11 +245,6 @@ if authenticated_user.get("is_admin"):
                                 bool(selected_user.get("is_admin"))
                                 if is_self
                                 else edit_is_admin
-                            ),
-                            "is_active": (
-                                bool(selected_user.get("is_active"))
-                                if is_self
-                                else edit_is_active
                             ),
                         }
                     )
