@@ -23,13 +23,16 @@ st.set_page_config(
 st.title("📚 ソード・ワールド2.5 ルールAI bot")
 
 API_URL = os.getenv("QA_API_URL", "http://localhost:8000/ask")
+DEFAULT_HYBRID_K = 20
 
 if "history" not in st.session_state:
     st.session_state.history = []
 if "question_submitted" not in st.session_state:
     st.session_state.question_submitted = False
-if "hybrid_k" not in st.session_state:
-    st.session_state.hybrid_k = 10
+if "drilldown_active" not in st.session_state:
+    st.session_state.drilldown_active = False
+if "drilldown_history" not in st.session_state:
+    st.session_state.drilldown_history = []
 
 
 # ============================================================
@@ -142,10 +145,25 @@ def calculate_price(model, token_usage):
     return input_price, output_price, input_price + output_price
 
 
-def make_history_entry(question: str, result: dict) -> dict:
+def make_history_entry(
+    question: str,
+    result: dict,
+    *,
+    mode: str,
+    conversation_before: list | None = None,
+) -> dict:
+    conversation_before = list(conversation_before or [])
+    conversation_after = conversation_before + [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": result.get("answer", "")},
+    ]
     return {
+        "id": len(st.session_state.history),
         "question": question,
         "answer": result.get("answer", ""),
+        "mode": mode,
+        "conversation_before": conversation_before,
+        "conversation_after": conversation_after,
         "citations": result.get("citations", []),
         "sources": result.get("sources", []),
         "model_used": result.get("model_used"),
@@ -157,6 +175,18 @@ def make_history_entry(question: str, result: dict) -> dict:
         "reference_pages_used": result.get("reference_pages_used", 0),
         "max_k": result.get("max_k", 100),
     }
+
+
+def activate_drilldown(entry: dict):
+    st.session_state.drilldown_active = True
+    st.session_state.drilldown_history = list(
+        entry.get("conversation_after", [])
+    )
+
+
+def stop_drilldown():
+    st.session_state.drilldown_active = False
+    st.session_state.drilldown_history = []
 
 
 def render_citation(citation: dict):
@@ -325,44 +355,21 @@ for category, category_info in book_categories.items():
 
 
 # ============================================================
-# Help
-# ============================================================
-
-with st.expander("操作説明 (クリックして開く)"):
-    st.markdown(
-        """
-## このアプリケーションの使い方
-
-1. **質問入力欄**に質問を入力してください。  
-2. 回答モードを選択してください。  
-3. 必要に応じて検索対象の書籍を選択してください。  
-4. 「質問する」をクリックすると、回答と出典が表示されます。  
-5. 出典には、書籍ページ・選定理由・該当箇所の抜粋・画像/PDFリンクを表示します。
-
-## 各モード
-
-### ルールブックに基づく回答と出典
-- Vector/全文検索に加え、目次・索引を利用して関連ページを検索します。
-- 「○頁参照」「次頁」など本文中の参照先も追跡します。
-- 「表」「テーブル」「一覧」などの質問では、複数書籍にある表本体を追加探索します。
-- 「槍→スピア」「流派→秘伝」のようなルール用語の検索展開も行います。
-- 出典欄には、AIが回答中で実際に引用したページに加え、表本体や参照先など調査価値の高い関連資料を少数表示します。
-
-### 全文検索モード
-- 入力したキーワードが本文に出現するページを検索します。
-- AIは使用しません。
-- スペース区切りでAND検索できます。
-
-### AI自由解釈モード
-- 保有書籍データを渡さず、AI単体でSW2.5の文脈に沿って回答します。
-- 出典・掲載ページの確認には向きません。
-"""
-    )
-
-
-# ============================================================
 # Question form
 # ============================================================
+
+if st.session_state.get("drilldown_active"):
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.info(
+            "💬 掘り下げ中です。次の質問では、この会話の履歴を参照します。"
+        )
+    with col2:
+        st.button(
+            "掘り下げを終了",
+            on_click=stop_drilldown,
+            use_container_width=True,
+        )
 
 with st.form("question_form"):
     question = st.text_input(
@@ -390,10 +397,48 @@ with st.form("question_form"):
 
     submitted = st.form_submit_button("💬 質問する")
     if submitted:
-        st.session_state.hybrid_k = 10
         st.session_state.question_submitted = True
         st.session_state.current_question = question
         st.session_state.mode = selected_mode
+
+
+# ============================================================
+# Help
+# ============================================================
+
+with st.expander("操作説明 (クリックして開く)"):
+    st.markdown(
+        """
+## このアプリケーションの使い方
+
+1. **質問入力欄**に質問を入力してください。
+2. 回答モードを選択してください。
+3. 必要に応じて検索対象の書籍を選択してください。
+4. 「質問する」をクリックすると、回答と出典が表示されます。
+5. AI回答をさらに確認したい場合は、回答欄の **「この内容について掘り下げる」** をクリックしてください。
+6. 掘り下げ中は、その回答を起点とした会話履歴を参照して次の質問に回答します。
+7. 出典には、書籍ページ・選定理由・該当箇所の抜粋・画像/PDFリンクを表示します。
+
+## 各モード
+
+### ルールブックに基づく回答と出典
+- Vector/全文検索に加え、目次・索引を利用して関連ページを検索します。
+- 「○頁参照」「次頁」など本文中の参照先も追跡します。
+- 「表」「テーブル」「一覧」などの質問では、複数書籍にある表本体を追加探索します。
+- 「槍→スピア」「流派→秘伝」のようなルール用語の検索展開も行います。
+- 出典欄には、AIが回答中で実際に引用したページに加え、表本体や参照先など調査価値の高い関連資料を少数表示します。
+- 「この内容について掘り下げる」を使用すると、会話履歴を踏まえて追加質問できます。
+
+### 全文検索モード
+- 入力したキーワードが本文に出現するページを検索します。
+- AIは使用しません。
+- スペース区切りでAND検索できます。
+
+### AI自由解釈モード
+- 保有書籍データを渡さず、AI単体でSW2.5の文脈に沿って回答します。
+- 出典・掲載ページの確認には向きません。
+"""
+    )
 
 
 # ============================================================
@@ -408,27 +453,46 @@ if st.session_state.get("question_submitted"):
     else:
         with st.spinner("AIが調査中です..."):
             try:
+                current_mode = st.session_state.get("mode", "rules_strict")
+                conversation_history = (
+                    list(st.session_state.get("drilldown_history", []))
+                    if (
+                        st.session_state.get("drilldown_active")
+                        and current_mode != "exact_search"
+                    )
+                    else []
+                )
+
                 response = requests.post(
                     API_URL,
                     json={
                         "question": current_question,
                         "books": selected_books,
                         "model": selected_model,
-                        "mode": st.session_state.get("mode", "rules_strict"),
-                        "k": st.session_state.get("hybrid_k", 10),
+                        "mode": current_mode,
+                        "k": DEFAULT_HYBRID_K,
+                        "history": conversation_history,
                     },
                     timeout=180,
                 )
 
                 if response.status_code == 200:
                     result = response.json()
-                    st.session_state.history.append(
-                        make_history_entry(current_question, result)
+                    entry = make_history_entry(
+                        current_question,
+                        result,
+                        mode=current_mode,
+                        conversation_before=conversation_history,
                     )
-                    st.session_state.hybrid_k = result.get(
-                        "hybrid_k_used",
-                        st.session_state.get("hybrid_k", 10),
-                    )
+                    st.session_state.history.append(entry)
+
+                    if (
+                        st.session_state.get("drilldown_active")
+                        and current_mode != "exact_search"
+                    ):
+                        st.session_state.drilldown_history = list(
+                            entry["conversation_after"]
+                        )
                 else:
                     st.error(
                         "APIからの応答に失敗しました。"
@@ -438,52 +502,6 @@ if st.session_state.get("question_submitted"):
                 st.error(f"エラーが発生しました: {exc}")
 
     st.session_state.question_submitted = False
-
-
-# ============================================================
-# Expand search
-# ============================================================
-
-
-def expand_search():
-    current_k = int(st.session_state.get("hybrid_k", 10))
-    new_k = current_k + 10
-    max_k = 100
-
-    if new_k > max_k:
-        st.warning(f"最大 k 値を超えました: {max_k}")
-        return
-
-    st.session_state.hybrid_k = new_k
-
-    try:
-        response = requests.post(
-            API_URL,
-            json={
-                "question": st.session_state.get("current_question", ""),
-                "books": selected_books,
-                "model": selected_model,
-                "mode": st.session_state.get("mode", "rules_strict"),
-                "k": new_k,
-            },
-            timeout=180,
-        )
-    except Exception as exc:
-        st.error(f"再質問に失敗しました: {exc}")
-        return
-
-    if response.status_code != 200:
-        st.error("再質問に失敗しました。")
-        return
-
-    result = response.json()
-    st.session_state.history.append(
-        make_history_entry(
-            st.session_state.get("current_question", ""),
-            result,
-        )
-    )
-    st.session_state.hybrid_k = result.get("hybrid_k_used", new_k)
 
 
 # ============================================================
@@ -530,7 +548,6 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
             nav_pages = int(entry.get("navigation_pages_used", 0) or 0)
             structured_pages = int(entry.get("structured_pages_used", 0) or 0)
             reference_pages = int(entry.get("reference_pages_used", 0) or 0)
-            max_k = int(entry.get("max_k", 100) or 100)
 
             st.markdown(
                 f"📊 推論コンテキスト: **{context_k} chunks** / "
@@ -540,12 +557,12 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
                 f"参照先: **{reference_pages} pages**"
             )
 
-            if hybrid_k and hybrid_k < max_k:
-                st.button(
-                    "通常検索範囲を広げて再質問",
-                    key=f"expand_search_{idx}",
-                    on_click=expand_search,
-                )
+            st.button(
+                "💬 この内容について掘り下げる",
+                key=f"drilldown_{entry.get('id', idx)}",
+                on_click=activate_drilldown,
+                args=(entry,),
+            )
 
         citations = entry.get("citations", [])
         if citations:
@@ -594,4 +611,5 @@ for idx, entry in enumerate(reversed(st.session_state.history)):
 st.sidebar.markdown("---")
 if st.sidebar.button("🧹 履歴をクリア"):
     st.session_state.history.clear()
+    stop_drilldown()
     st.rerun()

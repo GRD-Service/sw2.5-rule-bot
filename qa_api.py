@@ -18,7 +18,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.prompts import PromptTemplate
-from langchain.schema import HumanMessage, SystemMessage
+from langchain.schema import AIMessage, HumanMessage, SystemMessage
 
 
 # ============================================================
@@ -298,12 +298,18 @@ print(f"Navigation books loaded: {len(navigation_data)}")
 app = FastAPI()
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
 class QueryRequest(BaseModel):
     question: str
     books: Optional[List[str]] = None
     model: Optional[str] = "gpt-5.4-nano"
-    k: Optional[int] = 10
+    k: Optional[int] = 20
     mode: Optional[str] = "rules_strict"
+    history: Optional[List[ChatMessage]] = None
 
 
 class Citation(BaseModel):
@@ -340,6 +346,9 @@ template = """
 以下のコンテキストだけを根拠として、質問に正確に答えてください。
 
 回答ルール:
+- 「これまでの会話」は、現在の質問の文脈や指示語を理解するためだけに使用してください。
+- 過去のAI回答を、ルール・数値・条件・例外などの根拠として扱ってはいけません。
+- 事実関係は、今回取得したコンテキストで確認できた情報だけを根拠にしてください。
 - コンテキストに存在しない情報を推測して補ってはいけません。
 - 根拠を示す場合は、対応するコンテキストの引用IDを `[C1]` の形式で記載してください。
 - 引用IDは必ずコンテキスト中に存在するものだけを使用してください。
@@ -364,6 +373,9 @@ template = """
 今回の回答方針:
 {answer_guidance}
 
+これまでの会話:
+{conversation_history}
+
 コンテキスト:
 {context}
 
@@ -372,9 +384,64 @@ template = """
 """
 
 prompt = PromptTemplate(
-    input_variables=["context", "question", "answer_guidance"],
+    input_variables=[
+        "context",
+        "question",
+        "answer_guidance",
+        "conversation_history",
+    ],
     template=template,
 )
+
+
+def normalize_chat_history(
+    history: Optional[List[ChatMessage]],
+    max_messages: int = 12,
+) -> list[dict]:
+    result = []
+    for message in history or []:
+        role = str(message.role or "").strip().lower()
+        content = str(message.content or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        result.append({"role": role, "content": content})
+    return result[-max_messages:]
+
+
+def format_conversation_history(history: list[dict]) -> str:
+    if not history:
+        return "（なし）"
+
+    lines = []
+    for message in history:
+        label = "ユーザー" if message["role"] == "user" else "アシスタント"
+        lines.append(f"{label}: {message['content']}")
+    return "\n\n".join(lines)
+
+
+def build_contextual_search_question(
+    question: str,
+    history: list[dict],
+) -> str:
+    """
+    掘り下げ質問の「それ」「その場合」などを検索しやすくする。
+
+    AI回答本文は検索語へ混ぜず、直近のユーザー質問だけを補助文脈として使う。
+    """
+    previous_questions = [
+        message["content"]
+        for message in history
+        if message["role"] == "user"
+    ][-3:]
+
+    if not previous_questions:
+        return question
+
+    parts = previous_questions + [question]
+    search_question = "\n".join(
+        part.strip() for part in parts if part and part.strip()
+    )
+    return search_question[-1600:]
 
 
 # ============================================================
@@ -1826,7 +1893,9 @@ def build_context_items(
 
     # 参照先追跡のseedには、navigation/structured上位とhybrid上位を使う。
     reference_seed_items = (
-        navigation_items + structured_items + hybrid_context_items[: min(12, len(hybrid_context_items))]
+        navigation_items
+        + structured_items
+        + hybrid_context_items[: min(12, len(hybrid_context_items))]
     )
     reference_pages = reference_expand_pages(reference_seed_items)
 
@@ -1921,8 +1990,17 @@ def ask_question(request: QueryRequest):
     books = request.books
     model_name = request.model or "gpt-5.4-nano"
     mode = request.mode or "rules_strict"
-    initial_k = max(1, int(request.k or 10))
+    initial_k = max(1, int(request.k or 20))
     max_k = HYBRID_CANDIDATE_K
+
+    conversation_history = normalize_chat_history(request.history)
+    conversation_history_text = format_conversation_history(
+        conversation_history
+    )
+    search_question = build_contextual_search_question(
+        question,
+        conversation_history,
+    )
 
     if mode == "free_chat":
         system_prompt = (
@@ -1930,12 +2008,14 @@ def ask_question(request: QueryRequest):
             "ユーザーの質問には必ずSW2.5の文脈で、具体的かつ専門的に回答してください。"
         )
         llm = ChatOpenAI(model_name=model_name, temperature=0.7)
-        response = llm.invoke(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=question),
-            ]
-        )
+        messages = [SystemMessage(content=system_prompt)]
+        for message in conversation_history:
+            if message["role"] == "user":
+                messages.append(HumanMessage(content=message["content"]))
+            else:
+                messages.append(AIMessage(content=message["content"]))
+        messages.append(HumanMessage(content=question))
+        response = llm.invoke(messages)
         return QueryResponse(
             answer=response.content,
             citations=[],
@@ -1985,28 +2065,30 @@ def ask_question(request: QueryRequest):
         )
 
     # rules_strict
-    variants = build_query_variants(question)
+    # 掘り下げ時は直近のユーザー質問も検索文脈へ含める。
+    # 過去のAI回答は検索語へ混ぜず、回答生成時の会話理解にだけ利用する。
+    variants = build_query_variants(search_question)
 
     hybrid_items = hybrid_search(
-        query=question,
+        query=search_question,
         top_k=initial_k,
         candidate_k=max_k,
         books=books,
         variants=variants,
     )
     navigation_pages, _exact_index_match = navigation_search(
-        query=question,
+        query=search_question,
         books=books,
         variants=variants,
     )
     structured_pages = structured_page_search(
-        question=question,
+        question=search_question,
         books=books,
         variants=variants,
     )
 
     context_items, reference_pages = build_context_items(
-        question=question,
+        question=search_question,
         navigation_pages=navigation_pages,
         structured_pages=structured_pages,
         hybrid_items=hybrid_items,
@@ -2027,7 +2109,7 @@ def ask_question(request: QueryRequest):
             token_usage={},
         )
 
-    citations = build_citations(context_items, question)
+    citations = build_citations(context_items, search_question)
     citation_id_map = {
         (citation.book, citation.pdf_page): citation.id for citation in citations
     }
@@ -2063,7 +2145,8 @@ def ask_question(request: QueryRequest):
     full_prompt = prompt.format(
         context=context,
         question=question,
-        answer_guidance=build_answer_guidance(question),
+        answer_guidance=build_answer_guidance(search_question),
+        conversation_history=conversation_history_text,
     )
 
     llm = ChatOpenAI(model_name=model_name, temperature=0)
@@ -2074,8 +2157,8 @@ def ask_question(request: QueryRequest):
         answer,
         citations,
         context_items,
-        structured_query=query_is_structured(question),
-        question=question,
+        structured_query=query_is_structured(search_question),
+        question=search_question,
     )
     sources = citations_to_legacy_sources(returned_citations)
 
