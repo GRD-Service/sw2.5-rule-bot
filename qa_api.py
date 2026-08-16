@@ -66,6 +66,32 @@ HYBRID_CANDIDATE_K = int(
 
 
 # ============================================================
+# Source authority settings
+# ============================================================
+
+# book_categories.json の weight を、
+# 検索順位へどの程度反映するか。
+#
+# 例:
+#   weight=1.0 -> x1.00
+#   weight=2.0 -> x1.20
+#   weight=3.0 -> x1.35（上限）
+SOURCE_AUTHORITY_STRENGTH = float(
+    os.getenv(
+        "SOURCE_AUTHORITY_STRENGTH",
+        "0.20",
+    )
+)
+
+SOURCE_AUTHORITY_MAX = float(
+    os.getenv(
+        "SOURCE_AUTHORITY_MAX",
+        "1.35",
+    )
+)
+
+
+# ============================================================
 # Navigation settings
 # ============================================================
 
@@ -493,7 +519,11 @@ template = """
 - 一つの段落が複数の引用元に基づく場合は、段落末尾に `[C1][C2]` のようにまとめて記載してください。
 - 長い回答では、どの記述がどの根拠に基づくか判別できるよう、必要な段落ごとに引用してください。
 - 「索引」や「目次」が検索根拠として使われていても、それ自体をルール本文として扱わず、対応する本文ページの内容を根拠にしてください。
-- 十分な根拠がコンテキストにない場合は、その旨を明確に回答してください。
+- 同じ事項について複数の書籍に記載がある場合、基本ルールブックに基本的な定義・数値・種族特徴・ルール本文が存在するなら、原則としてそれを回答の基礎にしてください。
+- サプリメントや追加書籍の記述は、基本ルールを置き換えるものと明記されていない限り、追加情報・補足情報として扱ってください。
+- 質問が希少種、追加種族、追加技能、追加魔法、追加アイテム、追加戦闘特技など、特定の追加要素を明示している場合は、その要素を収録したサプリメント側の記述を優先してください。
+- 基本種と希少種、基本ルールと追加ルールなど、異なる対象を混同しないでください。
+- 基本資料と追加資料で説明内容が異なる場合、コンテキストから変更・追加関係を確認できない限り、一方の内容で他方を上書きしないでください。- 十分な根拠がコンテキストにない場合は、その旨を明確に回答してください。
 
 コンテキスト:
 {context}
@@ -584,6 +614,56 @@ def get_document_category(
             book,
             "その他",
         ),
+    )
+
+
+def get_book_authority(
+    book: str,
+) -> float:
+    """
+    書籍カテゴリのweightを検索用authorityへ変換する。
+
+    生のweightをそのまま乗算すると影響が強すぎるため、
+    1.0～SOURCE_AUTHORITY_MAXへ圧縮する。
+    """
+
+    category = book_to_category.get(
+        book,
+        "その他",
+    )
+
+    raw_weight = float(
+        category_weight.get(
+            category,
+            1.0,
+        )
+    )
+
+    authority = (
+        1.0
+        + max(
+            0.0,
+            raw_weight - 1.0,
+        )
+        * SOURCE_AUTHORITY_STRENGTH
+    )
+
+    return min(
+        SOURCE_AUTHORITY_MAX,
+        authority,
+    )
+
+
+def get_document_authority(
+    doc,
+) -> float:
+    book = doc.metadata.get(
+        "book",
+        "",
+    )
+
+    return get_book_authority(
+        book
     )
 
 
@@ -959,18 +1039,11 @@ def definition_search(
             * 0.75
         )
 
-        category = (
-            get_document_category(
-                doc
-            )
-        )
+        # 単純な語出現にも最低点を与える
+        score += 1.0
 
-        score += (
-            category_weight.get(
-                category,
-                1.0,
-            )
-            * 0.1
+        score *= get_document_authority(
+            doc
         )
 
         candidates.append(
@@ -1227,29 +1300,8 @@ def hybrid_search(
                 )
             )
 
-        category = (
-            get_document_category(
-                doc
-            )
-        )
-
-        raw_category_weight = (
-            category_weight.get(
-                category,
-                1.0,
-            )
-        )
-
-        category_bonus = max(
-            0.0,
-            raw_category_weight
-            - 1.0,
-        )
-
-        score *= (
-            1.0
-            + 0.05
-            * category_bonus
+        score *= get_document_authority(
+            doc
         )
 
         scored_candidates.append(
@@ -1329,10 +1381,17 @@ def add_navigation_candidate(
     score: float,
     label: str,
     logical_page: int | None = None,
+    match_priority: int = 0,
 ):
     key = (
         book,
         pdf_page,
+    )
+
+    authority = (
+        get_book_authority(
+            book
+        )
     )
 
     existing = target.get(
@@ -1347,16 +1406,49 @@ def add_navigation_candidate(
         ),
         "source": source,
         "score": score,
+        "authority": authority,
+        "match_priority": (
+            match_priority
+        ),
         "label": label,
     }
 
-    if (
-        existing is None
-        or score
-        > existing[
+    if existing is None:
+
+        target[
+            key
+        ] = candidate
+
+        return
+
+    existing_key = (
+        existing.get(
+            "match_priority",
+            0,
+        ),
+        existing.get(
+            "authority",
+            1.0,
+        ),
+        existing.get(
+            "score",
+            0.0,
+        ),
+    )
+
+    candidate_key = (
+        candidate[
+            "match_priority"
+        ],
+        candidate[
+            "authority"
+        ],
+        candidate[
             "score"
-        ]
-    ):
+        ],
+    )
+
+    if candidate_key > existing_key:
         target[
             key
         ] = candidate
@@ -1520,14 +1612,46 @@ def navigation_index_search(
                     "match_type": (
                         match_type
                     ),
+                    "authority": (
+                        get_book_authority(
+                            book
+                        )
+                    ),
                 }
             )
 
+    match_priority = {
+        "exact": 4,
+        "term_in_query": 3,
+        "query_in_term": 2,
+        "fuzzy": 1,
+    }
+
     raw_matches.sort(
         key=lambda item: (
-            item["score"],
+            match_priority.get(
+                item[
+                    "match_type"
+                ],
+                0,
+            ),
+
+            # 同じ一致種別なら、
+            # 基本資料等を優先
+            item[
+                "authority"
+            ],
+
+            # fuzzy同士などでは元の関連度も利用
+            item[
+                "score"
+            ],
+
+            # より具体的な項目名を若干優先
             len(
-                item["term"]
+                item[
+                    "term"
+                ]
             ),
         ),
         reverse=True,
@@ -1586,6 +1710,14 @@ def navigation_index_search(
                         "score"
                     ]
                 ),
+                match_priority=(
+                    match_priority.get(
+                        match[
+                            "match_type"
+                        ],
+                        0,
+                    )
+                ),
                 label=(
                     f"索引: "
                     f"{match['term']}"
@@ -1595,8 +1727,20 @@ def navigation_index_search(
     result = sorted(
         page_candidates.values(),
         key=lambda item: (
-            item["score"],
-            -item["pdf_page"],
+            item.get(
+                "match_priority",
+                0,
+            ),
+            item.get(
+                "authority",
+                1.0,
+            ),
+            item[
+                "score"
+            ],
+            -item[
+                "pdf_page"
+            ],
         ),
         reverse=True,
     )
@@ -1741,6 +1885,14 @@ def navigation_toc_search(
                     ),
                     "source": "toc",
                     "score": score,
+
+                    # 追加
+                    "authority": (
+                        get_book_authority(
+                            book
+                        )
+                    ),
+
                     "label": (
                         f"目次: {title}"
                     ),
@@ -1756,8 +1908,16 @@ def navigation_toc_search(
 
     matches.sort(
         key=lambda item: (
-            item["score"],
-            -item["level"],
+            item[
+                "score"
+            ],
+            item.get(
+                "authority",
+                1.0,
+            ),
+            -item[
+                "level"
+            ],
         ),
         reverse=True,
     )
@@ -1872,6 +2032,11 @@ def build_section_expansion(
                         f"目次セクション続き: "
                         f"{toc['title']}"
                     ),
+                    "authority": (
+                        get_book_authority(
+                            book
+                        )
+                    ),
                 }
             )
 
@@ -1968,10 +2133,29 @@ def navigation_search(
     candidates.sort(
         key=lambda item: (
             source_priority.get(
-                item["source"],
+                item[
+                    "source"
+                ],
                 0,
             ),
-            item["score"],
+
+            item.get(
+                "match_priority",
+                0,
+            ),
+
+            item.get(
+                "authority",
+                get_book_authority(
+                    item[
+                        "book"
+                    ]
+                ),
+            ),
+
+            item[
+                "score"
+            ],
         ),
         reverse=True,
     )
