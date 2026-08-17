@@ -1236,6 +1236,26 @@ def citations_to_legacy_sources(citations: List[Citation]) -> List[str]:
     return result
 
 
+def normalize_citation_markers(answer: str) -> str:
+    """
+    LLMが内部コンテキスト表記をそのまま出力した場合でも、
+    公開用の [C1] 形式へ正規化する。
+
+    対応例:
+      [CITATION:C1]   -> [C1]
+      [CITATION\:C1] -> [C1]
+    """
+    if not answer:
+        return answer
+
+    return re.sub(
+        r"\[CITATION[\\]?:C(\d+)\]",
+        r"[C\1]",
+        answer,
+        flags=re.IGNORECASE,
+    )
+
+
 def extract_used_citation_ids(answer: str) -> list[int]:
     used = []
     for value in re.findall(r"\[C(\d+)\]", answer or ""):
@@ -2624,7 +2644,7 @@ def ask_question(
         source_text = f"\n検索種別: {source}" if source else ""
         context_text = item.get("context_text") or doc.page_content
         context_parts.append(
-            f"[CITATION:C{citation_id}]\n"
+            f"引用ID: [C{citation_id}]\n"
             f"書籍: {book}\n"
             f"書籍ページ: {logical_page}"
             f"{source_text}"
@@ -2643,7 +2663,13 @@ def ask_question(
     llm = ChatOpenAI(model_name=model_name, temperature=0)
     response = llm.invoke(full_prompt)
 
-    answer = collapse_repeated_citations(response.content)
+    answer = normalize_citation_markers(
+        response.content
+    )
+
+    answer = collapse_repeated_citations(
+        answer
+    )
     returned_citations = select_return_citations(
         answer,
         citations,
