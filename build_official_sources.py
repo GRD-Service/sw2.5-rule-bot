@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 6
+BUILD_VERSION = 7
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -1335,12 +1335,43 @@ def main(
                 f"methods={normalized['extract_method_counts']}"
             )
 
+            parsed_count = normalized[
+                "parse_status_counts"
+            ].get(
+                "LAYOUT_PARSED",
+                0,
+            )
+
+            complex_count = normalized[
+                "parse_status_counts"
+            ].get(
+                "LAYOUT_COMPLEX",
+                0,
+            )
+
+            record_count = normalized[
+                "record_count"
+            ]
+
+            complex_ratio = (
+                complex_count
+                / record_count
+                if record_count
+                else 0.0
+            )
+
             results.append(
                 {
                     "input_pdf": str(pdf_path),
                     "output_file": str(output_path),
                     "source_type": source_type,
-                    "record_count": normalized["record_count"],
+                    "record_count": record_count,
+                    "parsed_count": parsed_count,
+                    "complex_count": complex_count,
+                    "complex_ratio": round(
+                        complex_ratio,
+                        4,
+                    ),
                     "parse_status_counts": normalized[
                         "parse_status_counts"
                     ],
@@ -1367,11 +1398,163 @@ def main(
                 file=sys.stderr,
             )
 
+    total_records = sum(
+        item.get(
+            "record_count",
+            0,
+        )
+        for item in results
+    )
+
+    total_parsed = sum(
+        item.get(
+            "parsed_count",
+            0,
+        )
+        for item in results
+    )
+
+    total_complex = sum(
+        item.get(
+            "complex_count",
+            0,
+        )
+        for item in results
+    )
+
+    total_diagnostics = sum(
+        item.get(
+            "diagnostic_count",
+            0,
+        )
+        for item in results
+    )
+
+    total_operations = Counter()
+    total_extract_methods = Counter()
+
+    for item in results:
+        total_operations.update(
+            item.get(
+                "operation_counts",
+                {}
+            )
+        )
+        total_extract_methods.update(
+            item.get(
+                "extract_method_counts",
+                {}
+            )
+        )
+
+    by_complex_ratio = sorted(
+        results,
+        key=lambda item: (
+            item.get(
+                "complex_ratio",
+                0.0,
+            ),
+            item.get(
+                "complex_count",
+                0,
+            ),
+        ),
+        reverse=True,
+    )
+
+    by_diagnostics = sorted(
+        results,
+        key=lambda item: item.get(
+            "diagnostic_count",
+            0,
+        ),
+        reverse=True,
+    )
+
+    ocr_documents = [
+        item
+        for item in results
+        if item.get(
+            "extract_method_counts",
+            {}
+        ).get(
+            "tesseract_tsv",
+            0,
+        )
+        > 0
+    ]
+
     report = {
         "version": BUILD_VERSION,
         "generated_at": utc_now_iso(),
         "document_count": len(results),
         "error_count": len(errors),
+        "summary": {
+            "record_count": total_records,
+            "parsed_count": total_parsed,
+            "complex_count": total_complex,
+            "complex_ratio": round(
+                (
+                    total_complex
+                    / total_records
+                    if total_records
+                    else 0.0
+                ),
+                4,
+            ),
+            "diagnostic_count": total_diagnostics,
+            "operation_counts": dict(
+                sorted(
+                    total_operations.items()
+                )
+            ),
+            "extract_method_counts": dict(
+                sorted(
+                    total_extract_methods.items()
+                )
+            ),
+        },
+        "review_priority": {
+            "highest_complex_ratio": [
+                {
+                    "input_pdf": item[
+                        "input_pdf"
+                    ],
+                    "record_count": item[
+                        "record_count"
+                    ],
+                    "complex_count": item[
+                        "complex_count"
+                    ],
+                    "complex_ratio": item[
+                        "complex_ratio"
+                    ],
+                }
+                for item in by_complex_ratio[:10]
+            ],
+            "highest_diagnostic_count": [
+                {
+                    "input_pdf": item[
+                        "input_pdf"
+                    ],
+                    "diagnostic_count": item[
+                        "diagnostic_count"
+                    ],
+                }
+                for item in by_diagnostics[:10]
+            ],
+            "ocr_documents": [
+                {
+                    "input_pdf": item[
+                        "input_pdf"
+                    ],
+                    "extract_method_counts": item[
+                        "extract_method_counts"
+                    ],
+                }
+                for item in ocr_documents
+            ],
+        },
         "documents": results,
         "errors": errors,
     }
@@ -1396,6 +1579,70 @@ def main(
     print(
         f"Errors: {report['error_count']}"
     )
+    print(
+        f"Records: {report['summary']['record_count']}"
+    )
+    print(
+        "Parsed / Complex: "
+        f"{report['summary']['parsed_count']} / "
+        f"{report['summary']['complex_count']} "
+        f"(complex_ratio="
+        f"{report['summary']['complex_ratio']})"
+    )
+    print(
+        f"Operations: "
+        f"{report['summary']['operation_counts']}"
+    )
+    print(
+        f"Diagnostics: "
+        f"{report['summary']['diagnostic_count']}"
+    )
+    print(
+        f"Extract methods: "
+        f"{report['summary']['extract_method_counts']}"
+    )
+
+    if report[
+        "review_priority"
+    ][
+        "highest_complex_ratio"
+    ]:
+        print()
+        print(
+            "Highest complex ratio:"
+        )
+        for item in report[
+            "review_priority"
+        ][
+            "highest_complex_ratio"
+        ]:
+            print(
+                "  "
+                f"{Path(item['input_pdf']).name}: "
+                f"{item['complex_count']}/"
+                f"{item['record_count']} "
+                f"({item['complex_ratio']:.1%})"
+            )
+
+    if report[
+        "review_priority"
+    ][
+        "ocr_documents"
+    ]:
+        print()
+        print(
+            "OCR fallback documents:"
+        )
+        for item in report[
+            "review_priority"
+        ][
+            "ocr_documents"
+        ]:
+            print(
+                "  "
+                f"{Path(item['input_pdf']).name}: "
+                f"{item['extract_method_counts']}"
+            )
 
     return 1 if errors else 0
 
