@@ -320,7 +320,7 @@ def link_citation_markers(answer: str, citations: list) -> str:
             label = f"[{display_name}]"
 
         pdf_link, image_link = get_citation_links(citation)
-        target_link = image_link or pdf_link
+        target_link = pdf_link or image_link
 
         safe_label = html.escape(label)
         if not target_link:
@@ -378,29 +378,45 @@ def render_citation(citation: dict):
     image_html = ""
     link_html = safe_label
 
+    # 画像サムネイルは従来どおり画像を開く。
     if image_link:
-        safe_image_link = html.escape(image_link, quote=True)
+        safe_image_link = html.escape(
+            image_link,
+            quote=True,
+        )
+
         image_html = (
-            f"<a href='{safe_image_link}' target='_blank'>"
+            f"<a href='{safe_image_link}' "
+            f"target='_blank'>"
             f"<img src='{safe_image_link}' "
             f"style='width:110px;"
             f"border:1px solid #ccc;"
             f"border-radius:4px;'>"
             f"</a>"
         )
+
+    # 書籍名＋ページ番号はPDFを開く。
+    if pdf_link:
+        safe_pdf_link = html.escape(
+            pdf_link,
+            quote=True,
+        )
+
+        link_html = (
+            f"<a href='{safe_pdf_link}' "
+            f"target='_blank' "
+            f"style='text-decoration:none;"
+            f"font-weight:600;'>"
+            f"{safe_label}</a>"
+        )
+    elif image_link:
+        # PDFが存在しない場合のみ画像へfallback。
         link_html = (
             f"<a href='{safe_image_link}' "
             f"target='_blank' "
             f"style='text-decoration:none;"
             f"font-weight:600;'>"
             f"{safe_label}</a>"
-        )
-
-    pdf_html = ""
-    if pdf_link:
-        pdf_html = (
-            f"<a href='{html.escape(pdf_link, quote=True)}' "
-            f"target='_blank'>PDFで開く</a>"
         )
 
     if used_in_answer:
@@ -451,7 +467,6 @@ def render_citation(citation: dict):
   <div style="flex:0 0 auto;">{image_html}</div>
   <div style="flex:1;min-width:0;">
     <div>{link_html}{badge_html}</div>
-    <div style="font-size:0.90em;margin-top:2px;">{pdf_html}</div>
     {reason_html}
     {excerpt_html}
   </div>
