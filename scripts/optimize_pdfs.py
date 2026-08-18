@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,7 +10,9 @@ import time
 from pathlib import Path
 
 import fitz
+import pikepdf
 from PIL import Image
+from pikepdf import Array, Dictionary, Name
 
 
 SOURCE_DIR = Path(
@@ -43,9 +43,20 @@ JPEG_QUALITY = int(
     )
 )
 
+PAGE_TREE_GROUP_SIZE = int(
+    os.getenv(
+        "PDF_OPTIMIZER_PAGE_TREE_GROUP_SIZE",
+        "32",
+    )
+)
+
 STATE_FILE = OUTPUT_DIR / ".optimizer-state.json"
 
-OPTIMIZER_VERSION = 1
+# Version 2:
+# - hierarchical Page Tree
+# - linearization validation
+# - Page Tree validation
+OPTIMIZER_VERSION = 2
 
 
 def load_state() -> dict:
@@ -108,6 +119,7 @@ def source_signature(
         "mtime_ns": stat.st_mtime_ns,
         "width": TARGET_WIDTH,
         "jpeg_quality": JPEG_QUALITY,
+        "page_tree_group_size": PAGE_TREE_GROUP_SIZE,
         "optimizer_version": OPTIMIZER_VERSION,
     }
 
@@ -145,8 +157,11 @@ def render_page_to_jpeg(
 
     scale = TARGET_WIDTH / rect.width
 
-    # 元画像が1400px未満の場合は、
-    # 不要な拡大を行わない。
+    # 現行挙動を維持する。
+    #
+    # TARGET_WIDTH の扱いについては別途改善候補だが、
+    # Page Tree 最適化との比較条件を変えないため、
+    # 今回は変更しない。
     scale = min(
         scale,
         1.0,
@@ -251,6 +266,82 @@ def create_image_pdf(
         source_doc.close()
 
 
+def rebalance_page_tree(
+    source: Path,
+    destination: Path,
+    group_size: int,
+) -> None:
+    if group_size < 2:
+        raise ValueError(
+            "Page Tree group size must be >= 2"
+        )
+
+    with pikepdf.Pdf.open(
+        source
+    ) as pdf:
+        pages = [
+            page.obj
+            for page in pdf.pages
+        ]
+
+        if not pages:
+            raise RuntimeError(
+                "PDF contains no pages"
+            )
+
+        root_pages = pdf.Root.Pages
+
+        intermediate_nodes = []
+
+        for start in range(
+            0,
+            len(pages),
+            group_size,
+        ):
+            children = pages[
+                start:start + group_size
+            ]
+
+            node = Dictionary(
+                Type=Name.Pages,
+                Kids=Array(children),
+                Count=len(children),
+            )
+
+            node = pdf.make_indirect(
+                node
+            )
+
+            for page in children:
+                page.Parent = node
+
+            intermediate_nodes.append(
+                node
+            )
+
+        root_pages.Kids = Array(
+            intermediate_nodes
+        )
+
+        root_pages.Count = len(
+            pages
+        )
+
+        for node in intermediate_nodes:
+            node.Parent = root_pages
+
+        pdf.save(
+            destination
+        )
+
+    print(
+        "  Page Tree:"
+        f" {len(pages)} pages"
+        f" -> {len(intermediate_nodes)} groups"
+        f" (max {group_size} pages/group)"
+    )
+
+
 def get_page_count(
     path: Path,
 ) -> int:
@@ -286,14 +377,14 @@ def linearize_pdf(
             result.stdout.rstrip()
         )
 
-    # qpdf exit status:
+    # qpdf:
     #   0 = success
     #   2 = error
     #   3 = success with warnings
-    #
-    # Exit status 3 is accepted here because the generated
-    # PDF is subsequently checked by validate_pdf().
-    if result.returncode not in (0, 3):
+    if result.returncode not in (
+        0,
+        3,
+    ):
         raise RuntimeError(
             "qpdf linearization failed "
             f"with exit status "
@@ -305,6 +396,142 @@ def linearize_pdf(
             "  qpdf completed with warnings; "
             "continuing to validation..."
         )
+
+
+def run_qpdf_check(
+    args: list[str],
+    description: str,
+) -> None:
+    result = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    if result.stdout:
+        print(
+            result.stdout.rstrip()
+        )
+
+    if result.returncode not in (
+        0,
+        3,
+    ):
+        raise RuntimeError(
+            f"{description} failed "
+            f"with exit status "
+            f"{result.returncode}"
+        )
+
+
+def validate_page_tree(
+    path: Path,
+    expected_pages: int,
+    group_size: int,
+) -> None:
+    with pikepdf.Pdf.open(
+        path
+    ) as pdf:
+        root_pages = pdf.Root.Pages
+
+        root_count = int(
+            root_pages.Count
+        )
+
+        if root_count != expected_pages:
+            raise RuntimeError(
+                "Page Tree root count mismatch: "
+                f"{root_count} != "
+                f"{expected_pages}"
+            )
+
+        root_kids = list(
+            root_pages.Kids
+        )
+
+        if expected_pages <= group_size:
+            expected_groups = 1
+        else:
+            expected_groups = (
+                expected_pages
+                + group_size
+                - 1
+            ) // group_size
+
+        if len(root_kids) != expected_groups:
+            raise RuntimeError(
+                "Page Tree group count mismatch: "
+                f"{len(root_kids)} != "
+                f"{expected_groups}"
+            )
+
+        counted_pages = 0
+
+        for index, node in enumerate(
+            root_kids
+        ):
+            if node.Type != Name.Pages:
+                raise RuntimeError(
+                    "Page Tree root child "
+                    f"{index} is not /Pages"
+                )
+
+            node_count = int(
+                node.Count
+            )
+
+            if (
+                node_count < 1
+                or node_count > group_size
+            ):
+                raise RuntimeError(
+                    "Invalid Page Tree group size: "
+                    f"{node_count}"
+                )
+
+            children = list(
+                node.Kids
+            )
+
+            if len(children) != node_count:
+                raise RuntimeError(
+                    "Page Tree /Count and /Kids "
+                    "length mismatch"
+                )
+
+            for page in children:
+                if page.Type != Name.Page:
+                    raise RuntimeError(
+                        "Intermediate /Pages node "
+                        "contains non-/Page child"
+                    )
+
+                try:
+                    parent = page.Parent
+                except AttributeError as exc:
+                    raise RuntimeError(
+                        "Page object has no /Parent"
+                    ) from exc
+
+                if parent.objgen != node.objgen:
+                    raise RuntimeError(
+                        "Page /Parent does not point "
+                        "to expected intermediate node"
+                    )
+
+            counted_pages += node_count
+
+        if counted_pages != expected_pages:
+            raise RuntimeError(
+                "Page Tree total count mismatch: "
+                f"{counted_pages} != "
+                f"{expected_pages}"
+            )
+
+    print(
+        "  Page Tree validation: OK"
+    )
 
 
 def validate_pdf(
@@ -333,7 +560,7 @@ def validate_pdf(
     if original_pages != expected_pages:
         raise RuntimeError(
             "Original page count changed "
-            f"during processing: "
+            "during processing: "
             f"{original_pages} != "
             f"{expected_pages}"
         )
@@ -345,16 +572,28 @@ def validate_pdf(
             f"{expected_pages}"
         )
 
-    subprocess.run(
+    run_qpdf_check(
         [
             "qpdf",
             "--check",
             str(optimized),
         ],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        "qpdf PDF check",
+    )
+
+    run_qpdf_check(
+        [
+            "qpdf",
+            "--check-linearization",
+            str(optimized),
+        ],
+        "qpdf linearization check",
+    )
+
+    validate_page_tree(
+        optimized,
+        expected_pages,
+        PAGE_TREE_GROUP_SIZE,
     )
 
 
@@ -366,9 +605,11 @@ def optimize_pdf(
     print(
         "=" * 70
     )
+
     print(
         f"Optimizing: {source.name}"
     )
+
     print(
         "=" * 70
     )
@@ -397,6 +638,11 @@ def optimize_pdf(
             / "image.pdf"
         )
 
+        balanced_pdf = (
+            temp_dir_path
+            / "balanced.pdf"
+        )
+
         linearized_pdf = (
             temp_dir_path
             / "linearized.pdf"
@@ -410,11 +656,21 @@ def optimize_pdf(
         )
 
         print(
+            "  balancing Page Tree..."
+        )
+
+        rebalance_page_tree(
+            image_pdf,
+            balanced_pdf,
+            PAGE_TREE_GROUP_SIZE,
+        )
+
+        print(
             "  linearizing..."
         )
 
         linearize_pdf(
-            image_pdf,
+            balanced_pdf,
             linearized_pdf,
         )
 
@@ -428,10 +684,12 @@ def optimize_pdf(
             expected_pages,
         )
 
-        # 検証完了後にだけ本番ファイルへ置換する。
+        # 全検証が完了した場合だけ、
+        # 公開用PDFをatomic replaceする。
         #
-        # destination と一時ファイルは同じ
-        # filesystem上なので os.replace() はatomic。
+        # TemporaryDirectoryはdestinationと
+        # 同じfilesystem上に作成しているため、
+        # os.replace()はatomic。
         os.replace(
             linearized_pdf,
             destination,
@@ -479,9 +737,11 @@ def main() -> int:
     print(
         "=" * 70
     )
+
     print(
         "SW2.5 PDF.js PDF Optimizer"
     )
+
     print(
         "=" * 70
     )
@@ -502,12 +762,33 @@ def main() -> int:
         f"JPEG quality: {JPEG_QUALITY}"
     )
 
+    print(
+        "Page Tree group size: "
+        f"{PAGE_TREE_GROUP_SIZE}"
+    )
+
+    print(
+        f"Optimizer version: "
+        f"{OPTIMIZER_VERSION}"
+    )
+
+    if PAGE_TREE_GROUP_SIZE < 2:
+        print(
+            "ERROR: "
+            "PDF_OPTIMIZER_PAGE_TREE_GROUP_SIZE "
+            "must be >= 2",
+            file=sys.stderr,
+        )
+
+        return 1
+
     if not SOURCE_DIR.exists():
         print(
             f"ERROR: source directory "
             f"does not exist: {SOURCE_DIR}",
             file=sys.stderr,
         )
+
         return 1
 
     OUTPUT_DIR.mkdir(
@@ -525,6 +806,7 @@ def main() -> int:
             "ERROR: no PDF files found",
             file=sys.stderr,
         )
+
         return 1
 
     state = load_state()
@@ -547,6 +829,7 @@ def main() -> int:
             print(
                 f"SKIP: {source.name}"
             )
+
             skipped += 1
             continue
 
@@ -578,12 +861,15 @@ def main() -> int:
             )
 
     print()
+
     print(
         "=" * 70
     )
+
     print(
         "Summary"
     )
+
     print(
         "=" * 70
     )
