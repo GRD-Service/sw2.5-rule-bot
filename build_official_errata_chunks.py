@@ -280,8 +280,9 @@ def build_chunk_text(
         "location": record.get(
             "location"
         ),
-        "note": official_note,
-        "recovery_method": recovery_method,
+        "note": record.get(
+            "note"
+        ),
     }
 
     if operation == "replace":
@@ -437,9 +438,8 @@ def build_chunk(
         "delete_location": record.get(
             "delete_location"
         ),
-        "note": record.get(
-            "note"
-        ),
+        "note": official_note,
+        "recovery_method": recovery_method,
         "parse_status": record.get(
             "parse_status"
         ),
