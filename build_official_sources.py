@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 3
+BUILD_VERSION = 4
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -557,27 +557,6 @@ SUSPICIOUS_ENDINGS = (
 )
 
 
-def detect_internal_table(record: dict) -> bool:
-    """
-    セル内部の小表を保守的に検出する。
-
-    単なる複数行セルは内部表ではない。
-    同一のraw行の中で同じ論理列が複数回出現する場合のみ、
-    小表の可能性が高いとみなす。
-    """
-    raw_text = str(record.get("raw_text") or "")
-
-    for line in raw_text.splitlines():
-        if line.count("before:") >= 2:
-            return True
-        if line.count("after:") >= 2:
-            return True
-        if line.count("location:") >= 2:
-            return True
-
-    return False
-
-
 def looks_truncated(text: str | None) -> bool:
     if not text:
         return False
@@ -631,7 +610,7 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     ):
         reasons.append("APPEND_INSTRUCTION_PATTERN")
 
-    if detect_internal_table(record):
+    if record.get("internal_table_detected"):
         reasons.append("INTERNAL_TABLE_PATTERN")
 
     if looks_truncated(before):
@@ -647,6 +626,44 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     )
 
     return status, reasons
+
+
+def group_has_internal_table_pattern(
+    *,
+    column_items: dict[str, list[dict]],
+) -> bool:
+    """
+    同一視覚行・同一論理列に複数の独立要素が存在する場合だけ、
+    セル内部の小表候補とみなす。
+
+    単なる折り返しは別Y行になるため、ここでは検出されない。
+    """
+    for column_name in ("location", "before", "after"):
+        items = column_items.get(column_name, [])
+
+        if len(items) >= 2:
+            # 近接した別wordではなく、Poppler上で独立itemになっているもの。
+            # 明確に離れた要素が同一列に並ぶ場合を小表候補とする。
+            sorted_items = sorted(
+                items,
+                key=lambda item: float(item.get("x_min", 0.0)),
+            )
+
+            previous = None
+
+            for item in sorted_items:
+                if previous is not None:
+                    gap = (
+                        float(item.get("x_min", 0.0))
+                        - float(previous.get("x_max", 0.0))
+                    )
+
+                    if gap >= 6.0:
+                        return True
+
+                previous = item
+
+    return False
 
 
 def parse_errata_page(
@@ -688,6 +705,9 @@ def parse_errata_page(
             "raw_text": current["raw_text"],
             "parse_status": "LAYOUT_PARSED",
             "quality_reasons": [],
+            "internal_table_detected": bool(
+                current.get("internal_table_detected")
+            ),
             "extract_method": page.get("extract_method"),
         }
 
@@ -745,6 +765,7 @@ def parse_errata_page(
                 "before": [],
                 "after": [],
                 "raw_text": [],
+                "internal_table_detected": False,
             }
 
             if len(page_tokens) > 1:
@@ -758,6 +779,12 @@ def parse_errata_page(
                         ],
                     }
                 )
+
+        if current is not None:
+            if group_has_internal_table_pattern(
+                column_items=column_items,
+            ):
+                current["internal_table_detected"] = True
 
         if current is None:
             # 表前文など。診断として保持するがレコード化しない。
