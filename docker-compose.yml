@@ -188,10 +188,14 @@ services:
 
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
 
+      OFFICIAL_ERRATA_CHUNKS: /data/official/rag/groupsne_sw25_errata/official_errata_chunks.jsonl
+      OFFICIAL_ERRATA_REQUIRED: "1"
+
     volumes:
       - ${HOST_OCR_DIR}:/data/ocr:ro
       - ${HOST_VECTOR_INDEX_DIR}:/data/vector_index
       - ${HOST_METADATA_DIR}:/data/metadata:ro
+      - ${HOST_OFFICIAL_DIR}:/data/official:ro
 
     command:
       - python
