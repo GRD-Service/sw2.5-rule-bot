@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 13
+BUILD_VERSION = 14
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -1369,46 +1369,72 @@ def rescue_diagnostic_records(
         value = str(diagnostic.get("text") or "")
         parts = [part.strip() for part in value.split("|")]
 
-        # Only rescue unambiguous three-column rows.
-        if (
-            diagnostic.get("type") == "UNASSIGNED_ROW"
-            and len(parts) == 3
-            and all(parts)
-        ):
-            location, before, after = parts
-
-            rescued.append(
-                {
-                    "record_index": next_record_index,
-                    "target_page": None,
-                    "starred": False,
-                    "source_pdf_pages": [
-                        diagnostic.get("pdf_page")
-                    ],
-                    "location": location,
-                    "before": before,
-                    "after": after,
-                    "raw_text": (
-                        f"location:{location} | "
-                        f"before:{before} | after:{after}"
-                    ),
-                    "parse_status": "LAYOUT_PARSED",
-                    "quality_reasons": [],
-                    "internal_table_detected": False,
-                    "extract_method": extract_method,
-                    "operation": "replace",
-                    "append_instruction": None,
-                    "append_text": None,
-                    "append_location": None,
-                    "note": "rescued_from_diagnostic",
-                    "delete_instruction": None,
-                    "delete_text": None,
-                    "delete_location": None,
-                }
-            )
-            next_record_index += 1
-        else:
+        if diagnostic.get("type") != "UNASSIGNED_ROW":
             kept.append(diagnostic)
+            continue
+
+        if len(parts) < 3 or not all(parts):
+            kept.append(diagnostic)
+            continue
+
+        # 最後の2列をbefore/after、先頭側をlocation群として扱う。
+        # 3列:
+        #   location | before | after
+        #
+        # 4列:
+        #   location1 | location2 | before | after
+        #
+        # location群は連結する。5列以上は誤救済の危険が上がるため対象外。
+        if len(parts) not in (3, 4):
+            kept.append(diagnostic)
+            continue
+
+        location_parts = parts[:-2]
+        before = parts[-2]
+        after = parts[-1]
+
+        location = " ".join(location_parts).strip()
+
+        # before/afterが同一、またはlocationが空なら救済しない。
+        if (
+            not location
+            or not before
+            or not after
+            or before == after
+        ):
+            kept.append(diagnostic)
+            continue
+
+        rescued.append(
+            {
+                "record_index": next_record_index,
+                "target_page": None,
+                "starred": False,
+                "source_pdf_pages": [
+                    diagnostic.get("pdf_page")
+                ],
+                "location": location,
+                "before": before,
+                "after": after,
+                "raw_text": (
+                    f"location:{location} | "
+                    f"before:{before} | after:{after}"
+                ),
+                "parse_status": "LAYOUT_PARSED",
+                "quality_reasons": [],
+                "internal_table_detected": False,
+                "extract_method": extract_method,
+                "operation": "replace",
+                "append_instruction": None,
+                "append_text": None,
+                "append_location": None,
+                "note": "rescued_from_diagnostic",
+                "delete_instruction": None,
+                "delete_text": None,
+                "delete_location": None,
+            }
+        )
+        next_record_index += 1
 
     return rescued, kept, next_record_index
 
