@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-NORMALIZE_VERSION = 3
+NORMALIZE_VERSION = 4
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -214,6 +214,128 @@ def looks_like_row_start(
     )
 
 
+def split_columns_by_spacing(line: str) -> list[str]:
+    parts = [
+        part.strip()
+        for part in re.split(r"\s{2,}", line)
+        if part.strip()
+    ]
+    return parts
+
+
+def parse_simple_record(raw_text: str) -> dict:
+    """
+    安全に判定できる単純なERRATAだけ構造化する。
+
+    対応対象:
+      - 1行または末尾行に「location  before  after」が
+        2個以上の空白で明確に区切られているもの
+      - 直前行までをlocationの前置きとして連結
+
+    対応しない:
+      - 「※追記」「以下の文を追記」
+      - 行中に明示的な「誤」「正」表がある
+      - before/afterが複数行にまたがる
+      - 内部表
+    """
+
+    lines = [
+        line.strip()
+        for line in raw_text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return {
+            "parse_status": "COMPLEX",
+            "location": None,
+            "before": None,
+            "after": None,
+        }
+
+    joined = "\n".join(lines)
+
+    complex_markers = (
+        "※追記",
+        "以下の文を追記",
+        "誤 ",
+        "正 ",
+        "誤\n",
+        "正\n",
+    )
+
+    if any(marker in joined for marker in complex_markers):
+        return {
+            "parse_status": "COMPLEX",
+            "location": None,
+            "before": None,
+            "after": None,
+        }
+
+    candidate_index = None
+    candidate_parts = None
+
+    for idx in range(len(lines) - 1, -1, -1):
+        parts = split_columns_by_spacing(lines[idx])
+
+        if len(parts) >= 3:
+            candidate_index = idx
+            candidate_parts = parts
+            break
+
+    if candidate_index is None or candidate_parts is None:
+        return {
+            "parse_status": "COMPLEX",
+            "location": None,
+            "before": None,
+            "after": None,
+        }
+
+    location_tail = candidate_parts[0]
+    before = candidate_parts[-2]
+    after = candidate_parts[-1]
+
+    if not before or not after:
+        return {
+            "parse_status": "COMPLEX",
+            "location": None,
+            "before": None,
+            "after": None,
+        }
+
+    if before == after:
+        return {
+            "parse_status": "COMPLEX",
+            "location": None,
+            "before": None,
+            "after": None,
+        }
+
+    prefix_lines = lines[:candidate_index]
+
+    location_parts = prefix_lines + [location_tail]
+    location = " ".join(
+        part
+        for part in location_parts
+        if part
+    ).strip()
+
+    if not location:
+        return {
+            "parse_status": "COMPLEX",
+            "location": None,
+            "before": None,
+            "after": None,
+        }
+
+    return {
+        "parse_status": "SIMPLE_ROW",
+        "location": location,
+        "before": before,
+        "after": after,
+    }
+
+
 def make_record(
     *,
     record_index: int,
@@ -228,6 +350,10 @@ def make_record(
         if line
     ).strip()
 
+    parsed = parse_simple_record(
+        raw_text
+    )
+
     return {
         "record_index": record_index,
         "target_page": target_page,
@@ -235,11 +361,20 @@ def make_record(
         "source_pdf_pages": sorted(
             set(source_pdf_pages)
         ),
-        "location": None,
-        "before": None,
-        "after": None,
+        "location": parsed.get(
+            "location"
+        ),
+        "before": parsed.get(
+            "before"
+        ),
+        "after": parsed.get(
+            "after"
+        ),
         "raw_text": raw_text,
-        "parse_status": "RAW_BLOCK",
+        "parse_status": parsed.get(
+            "parse_status",
+            "COMPLEX",
+        ),
     }
 
 
@@ -591,6 +726,14 @@ def build_report(
         for result in results
     )
 
+    parse_status_counts = Counter()
+
+    for result in results:
+        for record in result.get("records", []):
+            parse_status_counts[
+                record.get("parse_status", "UNKNOWN")
+            ] += 1
+
     return {
         "version": (
             NORMALIZE_VERSION
@@ -620,6 +763,23 @@ def build_report(
         ),
         "unparsed_block_count": (
             total_unparsed
+        ),
+        "parse_status_counts": dict(
+            sorted(
+                parse_status_counts.items()
+            )
+        ),
+        "structured_errata_count": (
+            parse_status_counts.get(
+                "SIMPLE_ROW",
+                0,
+            )
+        ),
+        "complex_errata_count": (
+            parse_status_counts.get(
+                "COMPLEX",
+                0,
+            )
         ),
         "documents": [
             {
@@ -863,6 +1023,18 @@ def main(
     print(
         f"Unparsed blocks: "
         f"{report['unparsed_block_count']}"
+    )
+    print(
+        f"Parse statuses: "
+        f"{report['parse_status_counts']}"
+    )
+    print(
+        f"Structured ERRATA: "
+        f"{report['structured_errata_count']}"
+    )
+    print(
+        f"Complex ERRATA: "
+        f"{report['complex_errata_count']}"
     )
 
     return (
