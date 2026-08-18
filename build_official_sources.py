@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 9
+BUILD_VERSION = 10
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -689,24 +689,42 @@ def classify_operation(record: dict) -> tuple[str, dict]:
                     flags=re.DOTALL,
                 )
 
+                note = None
+
                 if quoted_match:
                     delete_text = quoted_match.group(1).strip()
+                    instruction = delete_source[
+                        :quoted_match.start()
+                    ].strip()
+
+                elif "※" in suffix:
+                    # 例:
+                    # ※〈血肉の赤鉄（大）（2,000）〉を削除
+                    # ※同項目が直上にあるため
+                    #
+                    # marker後半は注記であり、削除対象はmarker直前。
+                    trailing_note = suffix[
+                        suffix.find("※"):
+                    ].strip()
+
+                    delete_text = prefix.lstrip("※").strip()
+                    instruction = marker
+                    note = trailing_note or None
+
                 elif suffix:
                     delete_text = suffix
+                    instruction = marker
+
                 else:
                     # 「Xの一文を削除」型ではmarker直前が削除対象。
-                    delete_text = prefix
-
-                instruction = (
-                    delete_source[:quoted_match.start()].strip()
-                    if quoted_match
-                    else marker
-                )
+                    delete_text = prefix.lstrip("※").strip()
+                    instruction = marker
 
                 return "delete", {
                     "delete_instruction": instruction or marker,
                     "delete_text": delete_text or None,
                     "delete_location": location,
+                    "note": note,
                 }
 
     # full-text replacement instruction
