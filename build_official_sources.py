@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 10
+BUILD_VERSION = 11
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -537,6 +537,13 @@ APPEND_INSTRUCTION_PATTERNS = (
     "以下の一文を追記",
     "※追記",
     "を追記",
+    "末尾に",
+    "冒頭に以下を追加",
+    "以下の一文を追加",
+    "以下の文を追加",
+    "の後に以下の一文を追加",
+    "の後に以下の１文を追加",
+    "を追加",
 )
 
 SUSPICIOUS_ENDINGS = (
@@ -618,6 +625,7 @@ DELETE_PATTERNS = (
     "以下の２文を削除",
     "以下の文を削除",
     "一文を削除",
+    "以下の項目を",
 )
 
 REPLACE_FULLTEXT_PATTERNS = (
@@ -677,6 +685,29 @@ def classify_operation(record: dict) -> tuple[str, dict]:
         for marker in DELETE_PATTERNS:
             if marker in delete_source:
                 prefix, _, suffix = delete_source.partition(marker)
+
+                # 「以下の項目を『...』から削除 X」型は、
+                # 末尾の列挙を削除対象として扱う。
+                if marker == "以下の項目を":
+                    target_match = re.search(
+                        r'から削除(.+)$',
+                        delete_source,
+                        flags=re.DOTALL,
+                    )
+                    if target_match:
+                        delete_text = target_match.group(1).strip()
+                        note = None
+                        if "※" in delete_text:
+                            delete_text, note = delete_text.split("※", 1)
+                            delete_text = delete_text.strip()
+                            note = ("※" + note.strip()) if note.strip() else None
+
+                        return "delete", {
+                            "delete_instruction": delete_source[:target_match.start(1)].strip(),
+                            "delete_text": delete_text or None,
+                            "delete_location": location,
+                            "note": note,
+                        }
 
                 prefix = prefix.strip()
                 suffix = suffix.strip()
@@ -772,9 +803,24 @@ def classify_operation(record: dict) -> tuple[str, dict]:
 
         append_text = remainder.strip()
 
+        # 「末尾に『X』を追加」のように、追加本文がmarkerより前に
+        # 含まれるパターンも拾う。
+        if not append_text:
+            quoted_match = re.search(
+                r'([「『【].+[」』】])',
+                append_source,
+                flags=re.DOTALL,
+            )
+            if quoted_match:
+                append_text = quoted_match.group(1).strip()
+
+        # 「以下の一文を追加。本文」型では句点直後を本文とする。
+        if not append_text and "追加。" in append_source:
+            append_text = append_source.split("追加。", 1)[1].strip()
+
         if append_text:
             return "append", {
-                "append_instruction": instruction or None,
+                "append_instruction": instruction or append_marker,
                 "append_text": append_text,
                 "append_location": location,
             }
@@ -832,8 +878,6 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     if before is None or after is None:
         reasons.append("MISSING_BEFORE_OR_AFTER")
 
-    # 「追加Ｄ」のような項目名を誤検知しないため、
-    # locationは見ず、before/afterの指示文だけを見る。
     before_text = str(before or "")
     after_text = str(after or "")
     instruction_text = before_text + "\n" + after_text
@@ -847,11 +891,15 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     if record.get("internal_table_detected"):
         reasons.append("INTERNAL_TABLE_PATTERN")
 
-    if looks_truncated(before):
-        reasons.append("BEFORE_LOOKS_TRUNCATED")
+    # 通常replaceでは、助詞終わり・括弧欠落・短い断片を
+    # truncate理由にしない。エラッタ自体が部分文字列置換や
+    # 括弧欠落修正であることが多いため。
+    if record.get("operation") != "replace":
+        if looks_truncated(before):
+            reasons.append("BEFORE_LOOKS_TRUNCATED")
 
-    if looks_truncated(after):
-        reasons.append("AFTER_LOOKS_TRUNCATED")
+        if looks_truncated(after):
+            reasons.append("AFTER_LOOKS_TRUNCATED")
 
     status = (
         "LAYOUT_COMPLEX"
