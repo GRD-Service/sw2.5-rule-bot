@@ -364,3 +364,28 @@ services:
     command:
       - python
       - /app/scripts/build_book_navigation.py
+
+  official-source-builder:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+
+    profiles:
+      - tools
+
+    volumes:
+      # GroupSNE等から取得したrawデータと抽出結果
+      - ${HOST_OFFICIAL_DIR}:/data/official
+
+      # official_sources.json は本番サーバ側metadataにのみ存在
+      - ${HOST_METADATA_DIR}:/data/metadata:ro
+
+    command:
+      - python
+      - fetch_official_sources.py
+      - --config
+      - /data/metadata/official_sources.json
+      - --output-dir
+      - /data/official/raw
