@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 11
+BUILD_VERSION = 12
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -635,6 +635,53 @@ REPLACE_FULLTEXT_PATTERNS = (
 )
 
 
+def normalize_append_payload(
+    source: str,
+    marker: str,
+    instruction: str,
+    append_text: str,
+) -> tuple[str, str]:
+    """
+    appendの指示文と追加本文を最終整形する。
+
+    例:
+      末尾に「X」を追加
+        -> instruction: 末尾に追加
+        -> text: 「X」
+
+      以下の一文を追加。X
+        -> instruction: 以下の一文を追加
+        -> text: X
+    """
+    instruction = instruction.strip()
+    append_text = append_text.strip()
+
+    # 文頭に残った句読点を除去。
+    append_text = append_text.lstrip("。．.、 ")
+
+    # 「末尾に『X』を追加」型。
+    if marker == "末尾に":
+        quoted_match = re.search(
+            r'([「『【].+[」』】])',
+            source,
+            flags=re.DOTALL,
+        )
+
+        if quoted_match:
+            append_text = quoted_match.group(1).strip()
+            instruction = "末尾に追加"
+
+    # 「冒頭に以下を追加『X』」型などは、
+    # append_textから末尾の操作語を除去する。
+    append_text = re.sub(
+        r'を追加[。．.]?$',
+        '',
+        append_text,
+    ).strip()
+
+    return instruction, append_text
+
+
 def classify_operation(record: dict) -> tuple[str, dict]:
     """
     ERRATA操作種別を安全側で正規化する。
@@ -819,11 +866,19 @@ def classify_operation(record: dict) -> tuple[str, dict]:
             append_text = append_source.split("追加。", 1)[1].strip()
 
         if append_text:
-            return "append", {
-                "append_instruction": instruction or append_marker,
-                "append_text": append_text,
-                "append_location": location,
-            }
+            instruction, append_text = normalize_append_payload(
+                append_source,
+                append_marker,
+                instruction or append_marker,
+                append_text,
+            )
+
+            if append_text:
+                return "append", {
+                    "append_instruction": instruction or append_marker,
+                    "append_text": append_text,
+                    "append_location": location,
+                }
 
     return "complex", {}
 
