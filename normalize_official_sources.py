@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-NORMALIZE_VERSION = 2
+NORMALIZE_VERSION = 3
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -107,6 +107,43 @@ def is_header_line(line: str) -> bool:
     )
 
 
+INLINE_STAR_ROW_RE = re.compile(
+    r"(?P<prefix>.*?)(?P<marker>[★☆]\s*[0-9]{1,4}\s+.+)$"
+)
+
+
+def split_inline_star_row(line: str) -> list[str]:
+    """
+    PyPDF2が次の訂正行を前行末へ結合する場合を救済する。
+
+    例:
+        「...修正を受けます。」  ★112 軽業判定
+
+    ↓
+
+        「...修正を受けます。」
+        ★112 軽業判定
+
+    通常の数字・「112頁」等は対象にせず、★/☆付きだけを分割する。
+    """
+
+    match = INLINE_STAR_ROW_RE.match(line)
+
+    if not match:
+        return [line]
+
+    prefix = match.group("prefix").rstrip()
+    marker = match.group("marker").lstrip()
+
+    if not prefix:
+        return [marker]
+
+    return [
+        prefix,
+        marker,
+    ]
+
+
 def iter_page_lines(page_record: dict) -> list[str]:
     text = str(page_record.get("text") or "")
 
@@ -118,7 +155,10 @@ def iter_page_lines(page_record: dict) -> list[str]:
         if is_header_line(line):
             continue
 
-        lines.append(line)
+        for part in split_inline_star_row(line):
+            if is_header_line(part):
+                continue
+            lines.append(part)
 
     return lines
 
