@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 7
+BUILD_VERSION = 8
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -613,6 +613,20 @@ def split_trailing_note(text: str | None) -> tuple[str | None, str | None]:
     )
 
 
+DELETE_PATTERNS = (
+    "を削除",
+    "以下の２文を削除",
+    "以下の文を削除",
+    "一文を削除",
+)
+
+REPLACE_FULLTEXT_PATTERNS = (
+    "全文を以下に差し替え",
+    "効果全文を以下に差し替え",
+    "表を以下に差し替え",
+)
+
+
 def classify_operation(record: dict) -> tuple[str, dict]:
     """
     ERRATA操作種別を安全側で正規化する。
@@ -620,8 +634,10 @@ def classify_operation(record: dict) -> tuple[str, dict]:
     優先順位:
       1. internal table -> complex
       2. before/after両方あり -> replace
-      3. 片側のみ + 明示的追記指示 + 追記本文あり -> append
-      4. その他 -> complex
+      3. delete指示 + 削除対象本文あり -> delete
+      4. 全文差し替え指示 + 新本文あり -> replace
+      5. 片側のみ + 明示的追記指示 + 追記本文あり -> append
+      6. その他 -> complex
     """
 
     before = record.get("before")
@@ -639,6 +655,14 @@ def classify_operation(record: dict) -> tuple[str, dict]:
             str(after)
         )
 
+        # afterが「※アイコン化」等の編集指示だけの場合は
+        # 実体の置換後テキストが取得できていないためcomplex。
+        after_text = str(normalized_after or "").strip()
+        if after_text.startswith("※"):
+            return "complex", {
+                "note": after_text,
+            }
+
         return "replace", {
             "normalized_after": normalized_after,
             "note": note,
@@ -647,6 +671,38 @@ def classify_operation(record: dict) -> tuple[str, dict]:
     before_text = str(before or "")
     after_text = str(after or "")
 
+    # delete
+    delete_source = before_text or after_text
+    if delete_source:
+        for marker in DELETE_PATTERNS:
+            if marker in delete_source:
+                prefix, _, suffix = delete_source.partition(marker)
+
+                delete_text = prefix.strip()
+                if not delete_text:
+                    delete_text = suffix.strip()
+
+                return "delete", {
+                    "delete_instruction": marker,
+                    "delete_text": delete_text or None,
+                    "delete_location": location,
+                }
+
+    # full-text replacement instruction
+    replace_source = before_text or after_text
+    if replace_source:
+        for marker in REPLACE_FULLTEXT_PATTERNS:
+            if marker in replace_source:
+                _, _, remainder = replace_source.partition(marker)
+                replacement_text = remainder.strip()
+
+                if replacement_text:
+                    return "replace", {
+                        "normalized_after": replacement_text,
+                        "note": marker,
+                    }
+
+    # append
     append_marker = None
     append_source = None
 
@@ -706,6 +762,15 @@ def apply_operation_classification(record: dict) -> None:
     record["note"] = extra.get(
         "note"
     )
+    record["delete_instruction"] = extra.get(
+        "delete_instruction"
+    )
+    record["delete_text"] = extra.get(
+        "delete_text"
+    )
+    record["delete_location"] = extra.get(
+        "delete_location"
+    )
 
     if operation == "replace":
         normalized_after = extra.get(
@@ -722,8 +787,8 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     before = record.get("before")
     after = record.get("after")
 
-    if not location:
-        reasons.append("MISSING_LOCATION")
+    # locationは任意。DXのように「頁 / 誤 / 正」だけで成立する
+    # 公式エラッタもあるため、欠落だけではComplexにしない。
 
     if before is None or after is None:
         reasons.append("MISSING_BEFORE_OR_AFTER")
@@ -849,7 +914,8 @@ def parse_errata_page(
             record
         )
 
-        # 完成したappendだけ、before/after欠落を許容する。
+        # 完成したappend/delete/全文差し替えは、
+        # before/after片側欠落を許容する。
         if (
             record.get("operation") == "append"
             and record.get("append_text")
@@ -861,6 +927,36 @@ def parse_errata_page(
                     "MISSING_BEFORE_OR_AFTER",
                     "APPEND_INSTRUCTION_PATTERN",
                 }
+            ]
+
+            if not quality_reasons:
+                quality_status = "LAYOUT_PARSED"
+
+        if (
+            record.get("operation") == "delete"
+            and record.get("delete_text")
+        ):
+            quality_reasons = [
+                reason
+                for reason in quality_reasons
+                if reason != "MISSING_BEFORE_OR_AFTER"
+            ]
+
+            if not quality_reasons:
+                quality_status = "LAYOUT_PARSED"
+
+        if (
+            record.get("operation") == "replace"
+            and record.get("after")
+            and (
+                record.get("before") is None
+                or record.get("before") == ""
+            )
+        ):
+            quality_reasons = [
+                reason
+                for reason in quality_reasons
+                if reason != "MISSING_BEFORE_OR_AFTER"
             ]
 
             if not quality_reasons:
