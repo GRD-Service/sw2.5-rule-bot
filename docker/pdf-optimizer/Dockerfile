@@ -14,8 +14,10 @@ RUN apt-get update \
 RUN pip install --upgrade pip \
     && pip install \
        PyMuPDF==1.26.3 \
-       Pillow==11.3.0
+       Pillow==11.3.0 \
+       pikepdf
 
 COPY scripts/optimize_pdfs.py /app/scripts/optimize_pdfs.py
+COPY scripts/rebalance_page_tree.py /app/scripts/rebalance_page_tree.py
 
 CMD ["python", "/app/scripts/optimize_pdfs.py"]
