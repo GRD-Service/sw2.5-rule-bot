@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 2
+BUILD_VERSION = 3
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -530,12 +530,13 @@ def join_cell_lines(lines: list[str]) -> str | None:
 
 
 
-COMPLEX_MARKERS = (
+APPEND_INSTRUCTION_PATTERNS = (
     "※末尾に以下の一文を追記",
+    "末尾に以下の一文を追記",
     "以下の文を追記",
+    "以下の一文を追記",
     "※追記",
     "を追記",
-    "追加",
 )
 
 SUSPICIOUS_ENDINGS = (
@@ -548,7 +549,6 @@ SUSPICIOUS_ENDINGS = (
     "は",
     "で",
     "と",
-    "、",
     "（",
     "「",
     "〈",
@@ -559,20 +559,20 @@ SUSPICIOUS_ENDINGS = (
 
 def detect_internal_table(record: dict) -> bool:
     """
-    raw_text内で同じ論理列が同一視覚行に複数回現れる場合、
-    セル内部に小表がある可能性が高い。
+    セル内部の小表を保守的に検出する。
+
+    単なる複数行セルは内部表ではない。
+    同一のraw行の中で同じ論理列が複数回出現する場合のみ、
+    小表の可能性が高いとみなす。
     """
     raw_text = str(record.get("raw_text") or "")
 
     for line in raw_text.splitlines():
-        before_count = line.count("before:")
-        after_count = line.count("after:")
-        location_count = line.count("location:")
-
-        if before_count >= 2 or after_count >= 2:
+        if line.count("before:") >= 2:
             return True
-
-        if location_count >= 1 and before_count >= 2:
+        if line.count("after:") >= 2:
+            return True
+        if line.count("location:") >= 2:
             return True
 
     return False
@@ -612,7 +612,6 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     location = record.get("location")
     before = record.get("before")
     after = record.get("after")
-    raw_text = str(record.get("raw_text") or "")
 
     if not location:
         reasons.append("MISSING_LOCATION")
@@ -620,8 +619,17 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     if before is None or after is None:
         reasons.append("MISSING_BEFORE_OR_AFTER")
 
-    if any(marker in raw_text for marker in COMPLEX_MARKERS):
-        reasons.append("APPEND_OR_ADDITION_PATTERN")
+    # 「追加Ｄ」のような項目名を誤検知しないため、
+    # locationは見ず、before/afterの指示文だけを見る。
+    before_text = str(before or "")
+    after_text = str(after or "")
+    instruction_text = before_text + "\n" + after_text
+
+    if any(
+        marker in instruction_text
+        for marker in APPEND_INSTRUCTION_PATTERNS
+    ):
+        reasons.append("APPEND_INSTRUCTION_PATTERN")
 
     if detect_internal_table(record):
         reasons.append("INTERNAL_TABLE_PATTERN")
@@ -631,24 +639,6 @@ def assess_record_quality(record: dict) -> tuple[str, list[str]]:
 
     if looks_truncated(after):
         reasons.append("AFTER_LOOKS_TRUNCATED")
-
-    # 誤・正が極端に短いのにraw側に追加行が多いケースも要注意。
-    raw_lines = [
-        line
-        for line in raw_text.splitlines()
-        if line.strip()
-    ]
-
-    if (
-        before is not None
-        and after is not None
-        and len(raw_lines) >= 4
-        and (
-            len(before.strip()) <= 2
-            or len(after.strip()) <= 2
-        )
-    ):
-        reasons.append("SHORT_VALUE_WITH_MULTIROW_RECORD")
 
     status = (
         "LAYOUT_COMPLEX"
