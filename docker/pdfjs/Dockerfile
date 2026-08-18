@@ -18,10 +18,16 @@ import re
 
 
 # ============================================================
-# Inject viewer_defaults.js before viewer.mjs
+# Paths
 # ============================================================
 
 viewer_html_path = Path("/out/pdfjs/web/viewer.html")
+viewer_mjs_path = Path("/out/pdfjs/web/viewer.mjs")
+
+
+# ============================================================
+# 1. Inject viewer_defaults.js before viewer.mjs
+# ============================================================
 
 text = viewer_html_path.read_text(encoding="utf-8-sig")
 
@@ -62,7 +68,81 @@ viewer_html_path.write_text(
 
 
 # ============================================================
-# Build-time verification
+# 2. Tune PDF.js network loading
+#
+# PDF.js default:
+#   rangeChunkSize = 64 KiB
+#
+# SW2.5:
+#   rangeChunkSize = 1 MiB
+#   disableAutoFetch = true
+#   disableStream = true
+#   disableRange = false
+#
+# disableAutoFetch requires disableStream=true in PDF.js.
+#
+# We patch the initial PDF open() call rather than relying on
+# viewer URL parameters.
+# ============================================================
+
+viewer_mjs = viewer_mjs_path.read_text(
+    encoding="utf-8",
+)
+
+open_pattern = re.compile(
+    r'this\.open\(\{\s*url:\s*file\s*\}\);'
+)
+
+open_matches = list(
+    open_pattern.finditer(viewer_mjs)
+)
+
+if len(open_matches) != 1:
+    raise RuntimeError(
+        "Expected exactly one initial PDF open call "
+        "in viewer.mjs, "
+        f"found {len(open_matches)}"
+    )
+
+network_replacement = """this.open({
+          url: file,
+
+          // SW2.5 PDF loading optimization.
+          //
+          // PDF.js defaults to 64 KiB range requests.
+          // Large SW2.5 rulebooks caused hundreds of small
+          // HTTP Range requests, resulting in browser-side
+          // queueing/stalling even when Cloudflare returned HIT.
+          //
+          // Start with 1 MiB as the evaluation value.
+          rangeChunkSize: 1024 * 1024,
+
+          // Do not automatically fetch the whole PDF after
+          // the currently required ranges have been loaded.
+          //
+          // PDF.js requires streaming to be disabled for
+          // disableAutoFetch to work correctly.
+          disableAutoFetch: true,
+          disableStream: true,
+
+          // Keep HTTP Range Requests enabled.
+          disableRange: false,
+        });"""
+
+viewer_mjs = open_pattern.sub(
+    network_replacement,
+    viewer_mjs,
+    count=1,
+)
+
+viewer_mjs_path.write_text(
+    viewer_mjs,
+    encoding="utf-8",
+)
+
+
+# ============================================================
+# 3. Build-time verification
 # ============================================================
 
 verify_html = viewer_html_path.read_text(
@@ -86,15 +166,53 @@ if (
         "before viewer.mjs"
     )
 
+
+verify_mjs = viewer_mjs_path.read_text(
+    encoding="utf-8"
+)
+
+required_network_markers = (
+    "rangeChunkSize: 1024 * 1024",
+    "disableAutoFetch: true",
+    "disableStream: true",
+    "disableRange: false",
+)
+
+for marker in required_network_markers:
+    count = verify_mjs.count(marker)
+
+    if count != 1:
+        raise RuntimeError(
+            "PDF.js network patch verification failed: "
+            f"{marker!r} found {count} times"
+        )
+
+
 print("Verified viewer_defaults.js injection:")
 print('<script src="viewer_defaults.js"></script>')
 print(viewer_tag)
+
+print("Verified PDF.js network tuning:")
+for marker in required_network_markers:
+    print(marker)
 PY
 
 RUN test -s /out/pdfjs/web/viewer_defaults.js \
     && grep -q \
        'viewer_defaults.js' \
-       /out/pdfjs/web/viewer.html
+       /out/pdfjs/web/viewer.html \
+    && grep -q \
+       'rangeChunkSize: 1024 \* 1024' \
+       /out/pdfjs/web/viewer.mjs \
+    && grep -q \
+       'disableAutoFetch: true' \
+       /out/pdfjs/web/viewer.mjs \
+    && grep -q \
+       'disableStream: true' \
+       /out/pdfjs/web/viewer.mjs \
+    && grep -q \
+       'disableRange: false' \
+       /out/pdfjs/web/viewer.mjs
 
 
 FROM nginx:1.28-alpine
