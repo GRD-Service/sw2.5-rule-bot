@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 4
+BUILD_VERSION = 5
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -585,6 +585,86 @@ def looks_truncated(text: str | None) -> bool:
     return False
 
 
+def classify_operation(record: dict) -> tuple[str, dict]:
+    """
+    ERRATAの操作種別を正規化する。
+
+    replace:
+        before / after が両方あり、通常の置換として扱える。
+
+    append:
+        「以下の文を追記」等の明示的な追記指示があり、
+        before側に追記位置と追記本文が含まれるケース。
+        before/afterの意味を無理に変換せず、append_* に分離して保持する。
+
+    complex:
+        内部表、欠落、分裂などで安全に正規化できないケース。
+    """
+
+    before = record.get("before")
+    after = record.get("after")
+    location = record.get("location")
+    internal_table = bool(record.get("internal_table_detected"))
+
+    if internal_table:
+        return "complex", {}
+
+    before_text = str(before or "")
+    after_text = str(after or "")
+
+    append_marker = None
+    append_source = None
+
+    for marker in APPEND_INSTRUCTION_PATTERNS:
+        if marker in before_text:
+            append_marker = marker
+            append_source = before_text
+            break
+
+        if marker in after_text:
+            append_marker = marker
+            append_source = after_text
+            break
+
+    if append_marker is not None:
+        instruction, _, remainder = append_source.partition(append_marker)
+
+        # marker自体が文頭の場合もあるため、その場合は全文をinstruction扱い。
+        if not instruction.strip():
+            instruction = append_marker
+            remainder = append_source[len(append_marker):]
+        else:
+            instruction = (instruction + append_marker).strip()
+
+        append_text = remainder.strip()
+
+        return "append", {
+            "append_instruction": instruction or None,
+            "append_text": append_text or None,
+            "append_location": location,
+        }
+
+    if before is not None and after is not None:
+        return "replace", {}
+
+    return "complex", {}
+
+
+def apply_operation_classification(record: dict) -> None:
+    operation, extra = classify_operation(record)
+
+    record["operation"] = operation
+
+    record["append_instruction"] = extra.get(
+        "append_instruction"
+    )
+    record["append_text"] = extra.get(
+        "append_text"
+    )
+    record["append_location"] = extra.get(
+        "append_location"
+    )
+
 def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     reasons: list[str] = []
 
@@ -711,12 +791,34 @@ def parse_errata_page(
             "extract_method": page.get("extract_method"),
         }
 
+        apply_operation_classification(
+            record
+        )
+
         quality_status, quality_reasons = assess_record_quality(
             record
         )
 
+        # appendとして意味が安全に取れた場合は、before/after欠落だけを理由に
+        # complexへ落とさない。ただし内部表や明確な途中切れはそのままcomplex。
+        if record.get("operation") == "append":
+            quality_reasons = [
+                reason
+                for reason in quality_reasons
+                if reason not in {
+                    "MISSING_BEFORE_OR_AFTER",
+                    "APPEND_INSTRUCTION_PATTERN",
+                }
+            ]
+
+            if not quality_reasons:
+                quality_status = "LAYOUT_PARSED"
+
         record["parse_status"] = quality_status
         record["quality_reasons"] = quality_reasons
+
+        if record["parse_status"] == "LAYOUT_COMPLEX":
+            record["operation"] = "complex"
 
         records.append(record)
         next_record_index += 1
@@ -916,6 +1018,17 @@ def parse_errata_document(
                     record.get(
                         "parse_status",
                         "UNKNOWN",
+                    )
+                    for record in records
+                ).items()
+            )
+        ),
+        "operation_counts": dict(
+            sorted(
+                Counter(
+                    record.get(
+                        "operation",
+                        "unknown",
                     )
                     for record in records
                 ).items()
@@ -1165,6 +1278,7 @@ def main(
                 "  "
                 f"records={normalized['record_count']} "
                 f"statuses={normalized['parse_status_counts']} "
+                f"operations={normalized['operation_counts']} "
                 f"diagnostics={normalized['diagnostic_count']} "
                 f"methods={normalized['extract_method_counts']}"
             )
@@ -1177,6 +1291,9 @@ def main(
                     "record_count": normalized["record_count"],
                     "parse_status_counts": normalized[
                         "parse_status_counts"
+                    ],
+                    "operation_counts": normalized[
+                        "operation_counts"
                     ],
                     "diagnostic_count": normalized["diagnostic_count"],
                     "extract_method_counts": normalized[
