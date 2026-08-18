@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 5
+BUILD_VERSION = 6
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -585,29 +585,64 @@ def looks_truncated(text: str | None) -> bool:
     return False
 
 
+def split_trailing_note(text: str | None) -> tuple[str | None, str | None]:
+    """
+    after末尾の編集注記を本文から分離する。
+
+    例:
+        〇蛇の身体※アイコンを追記
+    ->
+        value = 〇蛇の身体
+        note = ※アイコンを追記
+    """
+    if not text:
+        return text, None
+
+    value = text.strip()
+    marker_index = value.find("※")
+
+    if marker_index <= 0:
+        return value, None
+
+    main = value[:marker_index].rstrip()
+    note = value[marker_index:].strip()
+
+    return (
+        main or None,
+        note or None,
+    )
+
+
 def classify_operation(record: dict) -> tuple[str, dict]:
     """
-    ERRATAの操作種別を正規化する。
+    ERRATA操作種別を安全側で正規化する。
 
-    replace:
-        before / after が両方あり、通常の置換として扱える。
-
-    append:
-        「以下の文を追記」等の明示的な追記指示があり、
-        before側に追記位置と追記本文が含まれるケース。
-        before/afterの意味を無理に変換せず、append_* に分離して保持する。
-
-    complex:
-        内部表、欠落、分裂などで安全に正規化できないケース。
+    優先順位:
+      1. internal table -> complex
+      2. before/after両方あり -> replace
+      3. 片側のみ + 明示的追記指示 + 追記本文あり -> append
+      4. その他 -> complex
     """
 
     before = record.get("before")
     after = record.get("after")
     location = record.get("location")
-    internal_table = bool(record.get("internal_table_detected"))
+    internal_table = bool(
+        record.get("internal_table_detected")
+    )
 
     if internal_table:
         return "complex", {}
+
+    if before is not None and after is not None:
+        normalized_after, note = split_trailing_note(
+            str(after)
+        )
+
+        return "replace", {
+            "normalized_after": normalized_after,
+            "note": note,
+        }
 
     before_text = str(before or "")
     after_text = str(after or "")
@@ -627,31 +662,35 @@ def classify_operation(record: dict) -> tuple[str, dict]:
             break
 
     if append_marker is not None:
-        instruction, _, remainder = append_source.partition(append_marker)
+        instruction, _, remainder = append_source.partition(
+            append_marker
+        )
 
-        # marker自体が文頭の場合もあるため、その場合は全文をinstruction扱い。
         if not instruction.strip():
             instruction = append_marker
             remainder = append_source[len(append_marker):]
         else:
-            instruction = (instruction + append_marker).strip()
+            instruction = (
+                instruction
+                + append_marker
+            ).strip()
 
         append_text = remainder.strip()
 
-        return "append", {
-            "append_instruction": instruction or None,
-            "append_text": append_text or None,
-            "append_location": location,
-        }
-
-    if before is not None and after is not None:
-        return "replace", {}
+        if append_text:
+            return "append", {
+                "append_instruction": instruction or None,
+                "append_text": append_text,
+                "append_location": location,
+            }
 
     return "complex", {}
 
 
 def apply_operation_classification(record: dict) -> None:
-    operation, extra = classify_operation(record)
+    operation, extra = classify_operation(
+        record
+    )
 
     record["operation"] = operation
 
@@ -664,6 +703,17 @@ def apply_operation_classification(record: dict) -> None:
     record["append_location"] = extra.get(
         "append_location"
     )
+    record["note"] = extra.get(
+        "note"
+    )
+
+    if operation == "replace":
+        normalized_after = extra.get(
+            "normalized_after"
+        )
+
+        if normalized_after is not None:
+            record["after"] = normalized_after
 
 def assess_record_quality(record: dict) -> tuple[str, list[str]]:
     reasons: list[str] = []
@@ -799,9 +849,11 @@ def parse_errata_page(
             record
         )
 
-        # appendとして意味が安全に取れた場合は、before/after欠落だけを理由に
-        # complexへ落とさない。ただし内部表や明確な途中切れはそのままcomplex。
-        if record.get("operation") == "append":
+        # 完成したappendだけ、before/after欠落を許容する。
+        if (
+            record.get("operation") == "append"
+            and record.get("append_text")
+        ):
             quality_reasons = [
                 reason
                 for reason in quality_reasons
