@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 8
+BUILD_VERSION = 9
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -678,12 +678,33 @@ def classify_operation(record: dict) -> tuple[str, dict]:
             if marker in delete_source:
                 prefix, _, suffix = delete_source.partition(marker)
 
-                delete_text = prefix.strip()
-                if not delete_text:
-                    delete_text = suffix.strip()
+                prefix = prefix.strip()
+                suffix = suffix.strip()
+
+                # 「※以下の２文を削除『...』」型では、
+                # 指示文ではなく後続の引用本文を削除対象として優先する。
+                quoted_match = re.search(
+                    r'([「『].+[」』])',
+                    delete_source,
+                    flags=re.DOTALL,
+                )
+
+                if quoted_match:
+                    delete_text = quoted_match.group(1).strip()
+                elif suffix:
+                    delete_text = suffix
+                else:
+                    # 「Xの一文を削除」型ではmarker直前が削除対象。
+                    delete_text = prefix
+
+                instruction = (
+                    delete_source[:quoted_match.start()].strip()
+                    if quoted_match
+                    else marker
+                )
 
                 return "delete", {
-                    "delete_instruction": marker,
+                    "delete_instruction": instruction or marker,
                     "delete_text": delete_text or None,
                     "delete_location": location,
                 }
@@ -961,6 +982,15 @@ def parse_errata_page(
 
             if not quality_reasons:
                 quality_status = "LAYOUT_PARSED"
+
+        # operationがcomplexなら、RAG投入可否も必ずComplexへ同期する。
+        if record.get("operation") == "complex":
+            quality_status = "LAYOUT_COMPLEX"
+
+            if not quality_reasons:
+                quality_reasons = [
+                    "COMPLEX_OPERATION"
+                ]
 
         record["parse_status"] = quality_status
         record["quality_reasons"] = quality_reasons
