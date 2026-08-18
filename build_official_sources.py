@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 12
+BUILD_VERSION = 13
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -535,6 +535,7 @@ APPEND_INSTRUCTION_PATTERNS = (
     "末尾に以下の一文を追記",
     "以下の文を追記",
     "以下の一文を追記",
+    "※末尾に",
     "※追記",
     "を追記",
     "末尾に",
@@ -626,6 +627,7 @@ DELETE_PATTERNS = (
     "以下の文を削除",
     "一文を削除",
     "以下の項目を",
+    "項目ごと削除",
 )
 
 REPLACE_FULLTEXT_PATTERNS = (
@@ -633,6 +635,45 @@ REPLACE_FULLTEXT_PATTERNS = (
     "効果全文を以下に差し替え",
     "表を以下に差し替え",
 )
+
+
+EDITORIAL_NOTE_MARKERS = (
+    "再修正で",
+    "再度の修正になります",
+    "度重なる修正において",
+    "ご迷惑をおかけし",
+    "お詫び申し上げます",
+    "以下は同一誤字の修正になります",
+)
+
+
+def split_editorial_note(
+    text: str | None,
+) -> tuple[str | None, str | None]:
+    if not text:
+        return text, None
+
+    value = text.strip()
+    found = [
+        value.find(marker)
+        for marker in EDITORIAL_NOTE_MARKERS
+        if marker in value
+    ]
+
+    if not found:
+        return value, None
+
+    idx = min(found)
+    main = value[:idx].rstrip()
+    note = value[idx:].strip()
+
+    return main or None, note or None
+
+
+def clean_location_editorial_note(
+    location: str | None,
+) -> tuple[str | None, str | None]:
+    return split_editorial_note(location)
 
 
 def normalize_append_payload(
@@ -670,6 +711,17 @@ def normalize_append_payload(
         if quoted_match:
             append_text = quoted_match.group(1).strip()
             instruction = "末尾に追加"
+
+    # 「※末尾に（第二・大神）を追記」型。
+    if marker == "※末尾に":
+        match = re.search(
+            r'※末尾に(.+?)を追記',
+            source,
+            flags=re.DOTALL,
+        )
+        if match:
+            append_text = match.group(1).strip()
+            instruction = "末尾に追記"
 
     # 「冒頭に以下を追加『X』」型などは、
     # append_textから末尾の操作語を除去する。
@@ -710,6 +762,17 @@ def classify_operation(record: dict) -> tuple[str, dict]:
             str(after)
         )
 
+        normalized_after, editorial_note = split_editorial_note(
+            normalized_after
+        )
+
+        if editorial_note:
+            note = (
+                f"{note} {editorial_note}".strip()
+                if note
+                else editorial_note
+            )
+
         # afterが「※アイコン化」等の編集指示だけの場合は
         # 実体の置換後テキストが取得できていないためcomplex。
         after_text = str(normalized_after or "").strip()
@@ -725,6 +788,36 @@ def classify_operation(record: dict) -> tuple[str, dict]:
 
     before_text = str(before or "")
     after_text = str(after or "")
+
+    if (
+        str(location or "").strip() == "追記"
+        and before_text.strip()
+        and not after_text.strip()
+    ):
+        return "append", {
+            "append_instruction": "追記",
+            "append_text": before_text.strip(),
+            "append_location": location,
+        }
+
+    if (
+        "項目ごと削除" in before_text
+        and not after_text.strip()
+    ):
+        delete_text = None
+        if location:
+            match = re.search(
+                r'「([^」]+)」\s*$',
+                str(location),
+            )
+            if match:
+                delete_text = match.group(1)
+
+        return "delete", {
+            "delete_instruction": "項目ごと削除",
+            "delete_text": delete_text,
+            "delete_location": location,
+        }
 
     # delete
     delete_source = before_text or after_text
@@ -884,6 +977,13 @@ def classify_operation(record: dict) -> tuple[str, dict]:
 
 
 def apply_operation_classification(record: dict) -> None:
+    cleaned_location, location_note = clean_location_editorial_note(
+        record.get("location")
+    )
+
+    if cleaned_location is not None:
+        record["location"] = cleaned_location
+
     operation, extra = classify_operation(
         record
     )
@@ -902,6 +1002,13 @@ def apply_operation_classification(record: dict) -> None:
     record["note"] = extra.get(
         "note"
     )
+
+    if location_note:
+        record["note"] = (
+            f"{record['note']} {location_note}".strip()
+            if record.get("note")
+            else location_note
+        )
     record["delete_instruction"] = extra.get(
         "delete_instruction"
     )
@@ -1249,6 +1356,63 @@ def parse_errata_page(
     )
 
 
+def rescue_diagnostic_records(
+    diagnostics: list[dict],
+    *,
+    next_record_index: int,
+    extract_method: str,
+) -> tuple[list[dict], list[dict], int]:
+    rescued: list[dict] = []
+    kept: list[dict] = []
+
+    for diagnostic in diagnostics:
+        value = str(diagnostic.get("text") or "")
+        parts = [part.strip() for part in value.split("|")]
+
+        # Only rescue unambiguous three-column rows.
+        if (
+            diagnostic.get("type") == "UNASSIGNED_ROW"
+            and len(parts) == 3
+            and all(parts)
+        ):
+            location, before, after = parts
+
+            rescued.append(
+                {
+                    "record_index": next_record_index,
+                    "target_page": None,
+                    "starred": False,
+                    "source_pdf_pages": [
+                        diagnostic.get("pdf_page")
+                    ],
+                    "location": location,
+                    "before": before,
+                    "after": after,
+                    "raw_text": (
+                        f"location:{location} | "
+                        f"before:{before} | after:{after}"
+                    ),
+                    "parse_status": "LAYOUT_PARSED",
+                    "quality_reasons": [],
+                    "internal_table_detected": False,
+                    "extract_method": extract_method,
+                    "operation": "replace",
+                    "append_instruction": None,
+                    "append_text": None,
+                    "append_location": None,
+                    "note": "rescued_from_diagnostic",
+                    "delete_instruction": None,
+                    "delete_text": None,
+                    "delete_location": None,
+                }
+            )
+            next_record_index += 1
+        else:
+            kept.append(diagnostic)
+
+    return rescued, kept, next_record_index
+
+
 def parse_errata_document(
     *,
     pdf_path: Path,
@@ -1289,6 +1453,24 @@ def parse_errata_document(
         diagnostics.extend(
             page_diagnostics
         )
+
+    rescue_method = (
+        next(iter(extract_methods.keys()))
+        if len(extract_methods) == 1
+        else "mixed"
+    )
+
+    rescued_records, diagnostics, next_record_index = (
+        rescue_diagnostic_records(
+            diagnostics,
+            next_record_index=next_record_index,
+            extract_method=rescue_method,
+        )
+    )
+
+    records.extend(
+        rescued_records
+    )
 
     return {
         "version": BUILD_VERSION,
