@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 1
+BUILD_VERSION = 2
 
 SOURCE_TYPE_ERRATA = "ERRATA"
 SOURCE_TYPE_FAQ = "FAQ"
@@ -529,6 +529,136 @@ def join_cell_lines(lines: list[str]) -> str | None:
     return result or None
 
 
+
+COMPLEX_MARKERS = (
+    "※末尾に以下の一文を追記",
+    "以下の文を追記",
+    "※追記",
+    "を追記",
+    "追加",
+)
+
+SUSPICIOUS_ENDINGS = (
+    "修",
+    "の",
+    "に",
+    "を",
+    "へ",
+    "が",
+    "は",
+    "で",
+    "と",
+    "、",
+    "（",
+    "「",
+    "〈",
+    "《",
+    "【",
+)
+
+
+def detect_internal_table(record: dict) -> bool:
+    """
+    raw_text内で同じ論理列が同一視覚行に複数回現れる場合、
+    セル内部に小表がある可能性が高い。
+    """
+    raw_text = str(record.get("raw_text") or "")
+
+    for line in raw_text.splitlines():
+        before_count = line.count("before:")
+        after_count = line.count("after:")
+        location_count = line.count("location:")
+
+        if before_count >= 2 or after_count >= 2:
+            return True
+
+        if location_count >= 1 and before_count >= 2:
+            return True
+
+    return False
+
+
+def looks_truncated(text: str | None) -> bool:
+    if not text:
+        return False
+
+    value = text.strip()
+
+    if len(value) < 2:
+        return False
+
+    if value.endswith(SUSPICIOUS_ENDINGS):
+        return True
+
+    # 開き括弧だけが多い場合も途中切れの可能性。
+    bracket_pairs = (
+        ("（", "）"),
+        ("「", "」"),
+        ("〈", "〉"),
+        ("《", "》"),
+        ("【", "】"),
+    )
+
+    for opening, closing in bracket_pairs:
+        if value.count(opening) > value.count(closing):
+            return True
+
+    return False
+
+
+def assess_record_quality(record: dict) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+
+    location = record.get("location")
+    before = record.get("before")
+    after = record.get("after")
+    raw_text = str(record.get("raw_text") or "")
+
+    if not location:
+        reasons.append("MISSING_LOCATION")
+
+    if before is None or after is None:
+        reasons.append("MISSING_BEFORE_OR_AFTER")
+
+    if any(marker in raw_text for marker in COMPLEX_MARKERS):
+        reasons.append("APPEND_OR_ADDITION_PATTERN")
+
+    if detect_internal_table(record):
+        reasons.append("INTERNAL_TABLE_PATTERN")
+
+    if looks_truncated(before):
+        reasons.append("BEFORE_LOOKS_TRUNCATED")
+
+    if looks_truncated(after):
+        reasons.append("AFTER_LOOKS_TRUNCATED")
+
+    # 誤・正が極端に短いのにraw側に追加行が多いケースも要注意。
+    raw_lines = [
+        line
+        for line in raw_text.splitlines()
+        if line.strip()
+    ]
+
+    if (
+        before is not None
+        and after is not None
+        and len(raw_lines) >= 4
+        and (
+            len(before.strip()) <= 2
+            or len(after.strip()) <= 2
+        )
+    ):
+        reasons.append("SHORT_VALUE_WITH_MULTIROW_RECORD")
+
+    status = (
+        "LAYOUT_COMPLEX"
+        if reasons
+        else "LAYOUT_PARSED"
+    )
+
+    return status, reasons
+
+
 def parse_errata_page(
     page: dict,
     *,
@@ -567,11 +697,16 @@ def parse_errata_page(
             "after": join_cell_lines(current["after"]),
             "raw_text": current["raw_text"],
             "parse_status": "LAYOUT_PARSED",
+            "quality_reasons": [],
             "extract_method": page.get("extract_method"),
         }
 
-        if not record["location"]:
-            record["parse_status"] = "LAYOUT_PARTIAL"
+        quality_status, quality_reasons = assess_record_quality(
+            record
+        )
+
+        record["parse_status"] = quality_status
+        record["quality_reasons"] = quality_reasons
 
         records.append(record)
         next_record_index += 1
@@ -758,6 +893,17 @@ def parse_errata_document(
             )
         ),
         "record_count": len(records),
+        "parse_status_counts": dict(
+            sorted(
+                Counter(
+                    record.get(
+                        "parse_status",
+                        "UNKNOWN",
+                    )
+                    for record in records
+                ).items()
+            )
+        ),
         "records": records,
         "diagnostic_count": len(diagnostics),
         "diagnostics": diagnostics,
@@ -1001,6 +1147,7 @@ def main(
             print(
                 "  "
                 f"records={normalized['record_count']} "
+                f"statuses={normalized['parse_status_counts']} "
                 f"diagnostics={normalized['diagnostic_count']} "
                 f"methods={normalized['extract_method_counts']}"
             )
@@ -1011,6 +1158,9 @@ def main(
                     "output_file": str(output_path),
                     "source_type": source_type,
                     "record_count": normalized["record_count"],
+                    "parse_status_counts": normalized[
+                        "parse_status_counts"
+                    ],
                     "diagnostic_count": normalized["diagnostic_count"],
                     "extract_method_counts": normalized[
                         "extract_method_counts"
