@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-BUILD_VERSION = 1
+BUILD_VERSION = 2
 
 SUPPORTED_OPERATIONS = {
     "replace",
@@ -92,18 +92,52 @@ def write_jsonl(
             )
 
 
+SOURCE_TITLE_MAP = {
+    "SW2.5_1": "ソード・ワールド2.5 ルールブックI",
+    "SW2.5_2": "ソード・ワールド2.5 ルールブックII",
+    "SW2.5_3": "ソード・ワールド2.5 ルールブックIII",
+    "SW2.5_DX": "ソード・ワールド2.5 ルールブックDX",
+    "SW2.5_CBB": "ソード・ワールド2.5 キャラクタービルディングブック",
+    "SW2.5_arcanerelik": "ソード・ワールド2.5 アーケインレリック",
+    "SW2.5_magusarts": "ソード・ワールド2.5 メイガスアーツ",
+    "SW2.5_monstrouslore": "ソード・ワールド2.5 モンストラスロア",
+    "SW2.5_epictreasury": "ソード・ワールド2.5 エピックトレジャリー",
+    "SW2.5_battlemastery": "ソード・ワールド2.5 バトルマスタリー",
+    "SW2.5_barbarous": "ソード・ワールド2.5 バルバロスレイジ",
+    "SW2.5_outlaw": "ソード・ワールド2.5 アウトロープロファイルブック",
+    "SW2.5_daemonsline": "ソード・ワールド2.5 デモンズライン",
+    "SW2.5_kingsfall": "ソード・ワールド2.5 キングスフォール",
+    "SW2.5_granzale": "ソード・ワールド2.5 グランゼール",
+    "SW2.5_vicecity": "ソード・ワールド2.5 ヴァイスシティ",
+    "SW2.5_raxialife": "ソード・ワールド2.5 ラクシアライフ",
+    "SW2.5_travelsinalfreim": "ソード・ワールド2.5 アルフレイム見聞録",
+    "SW2.5_star": "ソード・ワールド2.5 星をつかむ迷宮",
+    "SW2.5_tyrant": "ソード・ワールド2.5 タイラント",
+    "SW2.5_infinite": "ソード・ワールド2.5 インフィニットコロッセオ",
+    "SW2.5_abyssbreaker": "ソード・ワールド2.5 アビスブレイカー",
+    "SW2.5_ursyla": "ソード・ワールド2.5 ウルシラ地方",
+    "SW2.5_leondar": "ソード・ワールド2.5 レオンダール地方",
+    "SW2.5_barbarousSaga": "ソード・ワールド2.5 バルバロスサーガ",
+}
+
+
 def normalize_source_title(
     source_key: str | None,
 ) -> str:
     if not source_key:
         return "ソード・ワールド2.5"
 
-    value = source_key.replace(
+    mapped = SOURCE_TITLE_MAP.get(
+        source_key
+    )
+
+    if mapped:
+        return mapped
+
+    return source_key.replace(
         "_",
         " ",
     )
-
-    return value
 
 
 def page_label(
@@ -246,9 +280,8 @@ def build_chunk_text(
         "location": record.get(
             "location"
         ),
-        "note": record.get(
-            "note"
-        ),
+        "note": official_note,
+        "recovery_method": recovery_method,
     }
 
     if operation == "replace":
@@ -289,6 +322,15 @@ def build_chunk_text(
     )
 
 
+def split_recovery_metadata(
+    note: str | None,
+) -> tuple[str | None, str | None]:
+    if note == "rescued_from_diagnostic":
+        return None, "diagnostic_rescue"
+
+    return note, None
+
+
 def build_chunk(
     *,
     document: dict,
@@ -307,6 +349,19 @@ def build_chunk(
         "operation"
     )
 
+    official_note, recovery_method = split_recovery_metadata(
+        record.get(
+            "note"
+        )
+    )
+
+    record_for_text = dict(
+        record
+    )
+    record_for_text[
+        "note"
+    ] = official_note
+
     record_index = record.get(
         "record_index"
     )
@@ -318,7 +373,7 @@ def build_chunk(
 
     text = build_chunk_text(
         title=title,
-        record=record,
+        record=record_for_text,
     )
 
     metadata = {
