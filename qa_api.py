@@ -3765,15 +3765,15 @@ def ask_question(
     )
     context_items = merge_chat_memory_items(context_items, memory_items)
 
-    official_target_items = build_official_target_context_items(
-        official_context_items,
-        search_question,
-    )
-    context_items = merge_official_target_context_items(
-        context_items,
-        official_target_items,
-    )
-
+    # 公式訂正そのものは独立Citationとして扱うため、
+    # 対応原本ページをcontextへ強制注入しない。
+    #
+    # 以前はofficial correctionの対象原本をmandatory contextとして
+    # 追加していたが、一般語が訂正文中に偶然含まれるだけでも、
+    # 無関係な対象原本が「関連資料」として残る副作用があった。
+    #
+    # 原本ページが質問に本当に関連する場合は、通常のbook retrieval
+    # / navigation / reference searchから取得される。
     if not context_items:
         return finalize_response(QueryResponse(
             answer="該当する情報が見つかりませんでした。",
