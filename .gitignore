@@ -9,6 +9,7 @@ ocr/
 vector_index/
 pdf/
 image/
+data/
 
 # Python
 __pycache__/
