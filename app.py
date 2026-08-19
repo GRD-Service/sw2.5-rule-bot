@@ -307,9 +307,9 @@ def link_citation_markers(answer: str, citations: list) -> str:
         if not citation:
             return match.group(0)
 
-        citation_type = citation.get("type") or citation.get("citation_type") or ""
+        source_type = citation.get("source_type") or "book"
 
-        if citation_type == "official_correction":
+        if source_type == "official_correction":
             label = "[公式エラッタ]"
             target_link = citation.get("source_url") or ""
         else:
@@ -371,35 +371,31 @@ def calculate_price(model, token_usage):
 
 
 def render_citation(citation: dict):
-    citation_type = citation.get("type") or citation.get("citation_type") or ""
+    source_type = citation.get("source_type") or "book"
     reason = citation.get("reason") or ""
     excerpt = citation.get("excerpt") or ""
     used_in_answer = citation.get("used_in_answer", True)
 
-    safe_reason = html.escape(reason)
-    safe_excerpt = html.escape(excerpt)
+    badge_text = "回答で引用" if used_in_answer else "関連資料"
 
-    image_html = ""
-
-    if citation_type == "official_correction":
-        label = citation.get("label") or "公式エラッタ"
+    if source_type == "official_correction":
+        source_name = citation.get("book") or "GroupSNE公式エラッタ"
         source_url = citation.get("source_url") or ""
         target_book = citation.get("target_book") or ""
         target_page = citation.get("target_page")
         operation = citation.get("operation") or ""
 
-        safe_label = html.escape(label)
-        link_html = safe_label
-
         if source_url:
-            safe_source_url = html.escape(source_url, quote=True)
-            link_html = (
-                f"<a href='{safe_source_url}' "
-                f"target='_blank' "
-                f"style='text-decoration:none;"
-                f"font-weight:600;'>"
-                f"{safe_label}</a>"
+            safe_url = html.escape(source_url, quote=True)
+            safe_name = html.escape(source_name)
+            st.markdown(
+                f"<a href='{safe_url}' target='_blank' "
+                f"style='font-weight:600;text-decoration:none;'>"
+                f"{safe_name}</a>",
+                unsafe_allow_html=True,
             )
+        else:
+            st.markdown(f"**{source_name}**")
 
         details = []
         if target_book:
@@ -411,129 +407,80 @@ def render_citation(citation: dict):
                 details.append(f"対象: {target_display} p.{target_page}")
             else:
                 details.append(f"対象: {target_display}")
+
+        operation_labels = {
+            "replace": "置換",
+            "delete": "削除",
+            "append": "追記",
+        }
         if operation:
-            operation_labels = {
-                "replace": "置換",
-                "delete": "削除",
-                "append": "追記",
-            }
             details.append(
                 "訂正種別: "
                 + operation_labels.get(operation, operation)
             )
 
-        if details:
-            correction_detail_html = (
-                "<div style='font-size:0.90em;"
-                "margin-top:4px;'>"
-                + html.escape(" / ".join(details))
-                + "</div>"
-            )
-        else:
-            correction_detail_html = ""
+        st.caption(" / ".join(["公式エラッタ", badge_text] + details))
+
+        if reason:
+            st.markdown("**選定理由:**")
+            st.caption(reason)
+
+        if excerpt:
+            st.markdown("**引用内容:**")
+            st.caption(excerpt)
+
+        return
+
+    label = get_citation_label(citation)
+    pdf_link, image_link = get_citation_links(citation)
+
+    if image_link:
+        image_col, text_col = st.columns([1, 5])
     else:
-        label = get_citation_label(citation)
-        pdf_link, image_link = get_citation_links(citation)
-        safe_label = html.escape(label)
-        link_html = safe_label
-        correction_detail_html = ""
+        image_col, text_col = None, st.container()
 
-        # 画像サムネイルは従来どおり画像を開く。
-        if image_link:
-            safe_image_link = html.escape(
-                image_link,
-                quote=True,
-            )
-
-            image_html = (
-                f"<a href='{safe_image_link}' "
-                f"target='_blank'>"
+    if image_col is not None:
+        with image_col:
+            safe_image_link = html.escape(image_link, quote=True)
+            st.markdown(
+                f"<a href='{safe_image_link}' target='_blank'>"
                 f"<img src='{safe_image_link}' "
-                f"style='width:110px;"
-                f"border:1px solid #ccc;"
-                f"border-radius:4px;'>"
-                f"</a>"
+                f"style='width:110px;border:1px solid #ccc;"
+                f"border-radius:4px;'></a>",
+                unsafe_allow_html=True,
             )
 
-        # 書籍名＋ページ番号はPDFを開く。
+    with text_col:
         if pdf_link:
-            safe_pdf_link = html.escape(
-                pdf_link,
-                quote=True,
-            )
-
-            link_html = (
-                f"<a href='{safe_pdf_link}' "
-                f"target='_blank' "
-                f"style='text-decoration:none;"
-                f"font-weight:600;'>"
-                f"{safe_label}</a>"
+            safe_pdf_link = html.escape(pdf_link, quote=True)
+            safe_label = html.escape(label)
+            st.markdown(
+                f"<a href='{safe_pdf_link}' target='_blank' "
+                f"style='font-weight:600;text-decoration:none;'>"
+                f"{safe_label}</a>",
+                unsafe_allow_html=True,
             )
         elif image_link:
-            # PDFが存在しない場合のみ画像へfallback。
-            link_html = (
-                f"<a href='{safe_image_link}' "
-                f"target='_blank' "
-                f"style='text-decoration:none;"
-                f"font-weight:600;'>"
-                f"{safe_label}</a>"
+            safe_image_link = html.escape(image_link, quote=True)
+            safe_label = html.escape(label)
+            st.markdown(
+                f"<a href='{safe_image_link}' target='_blank' "
+                f"style='font-weight:600;text-decoration:none;'>"
+                f"{safe_label}</a>",
+                unsafe_allow_html=True,
             )
+        else:
+            st.markdown(f"**{label}**")
 
-    if used_in_answer:
-        badge_html = (
-            "<span style='display:inline-block;"
-            "padding:2px 7px;"
-            "margin-left:6px;"
-            "font-size:0.78em;"
-            "border-radius:10px;"
-            "background:rgba(46,160,67,0.15);'>"
-            "回答で引用"
-            "</span>"
-        )
-    else:
-        badge_html = (
-            "<span style='display:inline-block;"
-            "padding:2px 7px;"
-            "margin-left:6px;"
-            "font-size:0.78em;"
-            "border-radius:10px;"
-            "background:rgba(31,111,235,0.12);'>"
-            "関連資料"
-            "</span>"
-        )
+        st.caption(badge_text)
 
-    reason_html = ""
-    if safe_reason:
-        reason_html = (
-            "<div style='font-size:0.90em;"
-            "margin-top:4px;'>"
-            "<strong>選定理由:</strong> "
-            f"{safe_reason}</div>"
-        )
+        if reason:
+            st.markdown("**選定理由:**")
+            st.caption(reason)
 
-    excerpt_html = ""
-    if safe_excerpt:
-        excerpt_html = (
-            "<div style='font-size:0.90em;"
-            "margin-top:6px;"
-            "padding:8px;"
-            "background:rgba(127,127,127,0.08);"
-            "border-radius:4px;'>"
-            f"{safe_excerpt}</div>"
-        )
-
-    card = f"""
-<div style="display:flex;gap:12px;align-items:flex-start;margin:10px 0 16px 0;">
-  <div style="flex:0 0 auto;">{image_html}</div>
-  <div style="flex:1;min-width:0;">
-    <div>{link_html}{badge_html}</div>
-    {correction_detail_html}
-    {reason_html}
-    {excerpt_html}
-  </div>
-</div>
-"""
-    st.markdown(card, unsafe_allow_html=True)
+        if excerpt:
+            st.markdown("**引用内容:**")
+            st.caption(excerpt)
 
 
 def render_assistant_message(message: dict):
