@@ -1353,22 +1353,33 @@ def citations_to_legacy_sources(citations: List[Citation]) -> List[str]:
 
 def normalize_citation_markers(answer: str) -> str:
     """
-    LLMが内部コンテキスト表記をそのまま出力した場合でも、
-    公開用の [C1] 形式へ正規化する。
+    LLMが生成するcitation表記をASCIIの [C1] 形式へ正規化する。
 
     対応例:
       [CITATION:C1]   -> [C1]
-      [CITATION\:C1] -> [C1]
+      [CITATION\\:C1] -> [C1]
+      ［C1］           -> [C1]
+      ［C1]            -> [C1]
+      [Ｃ1］           -> [C1]
     """
     if not answer:
         return answer
 
-    return re.sub(
+    normalized = re.sub(
         r"\[CITATION[\\]?:C(\d+)\]",
         r"[C\1]",
         answer,
         flags=re.IGNORECASE,
     )
+
+    normalized = re.sub(
+        r"[\[［][CＣ](\d+)[\]］]",
+        r"[C\1]",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    return normalized
 
 
 def extract_used_citation_ids(answer: str) -> list[int]:
