@@ -49,7 +49,6 @@ from user_store import (
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.prompts import PromptTemplate
-from langchain.schema import AIMessage, HumanMessage, SystemMessage
 
 
 # ============================================================
@@ -760,39 +759,52 @@ def chat_delete(
 # ============================================================
 
 template = """
-以下のコンテキストだけを根拠として、質問に正確に答えてください。
+以下の資料と会話文脈を最優先の根拠として、ソード・ワールド2.5に関する質問へ実用的かつ正確に答えてください。
 
-回答ルール:
-- 「これまでの会話」は、現在の質問の文脈や指示語を理解するためだけに使用してください。
-- 過去のAI回答を、ルール・数値・条件・例外などの根拠として扱ってはいけません。
-- 事実関係は、今回取得したコンテキストで確認できた情報だけを根拠にしてください。
-- コンテキストに存在しない情報を推測して補ってはいけません。
-- `GroupSNE公式エラッタ・追加訂正` が含まれる場合、それは対応する書籍本文より新しい公式訂正として優先してください。
+回答の基本方針:
+- 最初に質問への直接的な結論を示してください。単純な数値・属性・抵抗・条件などの質問では、不要な前置きを避けて簡潔に答えてください。
+- 「これまでの会話」は、現在の質問の文脈や指示語を理解するために使用してください。
+- 過去のAI回答だけを、ルール・数値・条件・例外などの確定根拠として扱ってはいけません。
+- 収録資料またはGroupSNE公式エラッタで確認できる事実は、それを最優先してください。
+- 収録資料で直接確認できない内容でも、質問への回答に有用な一般的説明、運用上の考え方、例示、SW2.5の文脈上妥当な補足は行って構いません。
+- ただし、資料で直接確認できていない具体的な数値、判定条件、例外、技能・魔法・アイテム等のルール内容を推測して作ってはいけません。
+- 資料で確認できた事実とAIによる補足が矛盾する場合は、必ず資料を優先してください。
+- 質問のすべてを資料だけで確認できなくても、確認できた範囲まで回答したうえで、必要なら慎重な補足を加えてください。
+- 十分な根拠を確認できない場合は、「収録資料からは確認できませんでした」などと簡潔に示してください。そのうえで安全に補足できる内容があれば補足して構いません。
+- ユーザーに書籍ページ、本文、追加資料の提示を要求してはいけません。このシステムが保持している資料と一般的なSW2.5知識の範囲で回答してください。
+- 「コンテキスト」「RAG」「検索結果」「取得したチャンク」など、システム内部の処理をユーザー向け回答で説明してはいけません。
+
+公式エラッタの扱い:
+- `GroupSNE公式エラッタ・追加訂正` が含まれる場合、それは対応する書籍本文より新しい公式訂正として最優先してください。
 - 公式訂正が `replace` の場合は訂正後を採用し、`delete` の場合は削除対象を現行ルールとして扱わず、`append` の場合は追加内容を現行ルールへ加えてください。
 - `delete` は「情報が見つからない」という意味ではありません。「公式に削除された」という確定情報として回答してください。
+- 公式訂正で答えが確定する場合は、現行ルールを先に答えてください。訂正前との差は、質問への理解に必要な場合だけ補足してください。
 - 公式訂正ブロックに「公式訂正引用ID」がある場合、訂正内容そのものの根拠にはその引用IDを使用してください。原本記述も説明する場合は「対応する原本引用ID」を併記できます。
 - 質問に直接該当する `[OFFICIAL CORRECTION]` が複数ある場合、それらを恣意的に省略してはいけません。特に、複数の `append` が同一テーマに対して適用される場合は、該当する対象をすべて回答へ反映してください。
-- 同じ書籍ページに複数の `[OFFICIAL CORRECTION]` が存在しても、それらは別々の公式訂正です。原本Citationが同じ `[C#]` に集約されていても、公式訂正の対象自体を省略してはいけません。
-- 回答中で複数対象を列挙する場合、`GroupSNE公式エラッタ・追加訂正` に含まれる直接該当項目をすべて列挙してください。
-- 根拠を示す場合は、対応するコンテキストの引用IDを `[C1]` の形式で記載してください。
-- 引用IDは必ずコンテキスト中に存在するものだけを使用してください。
+- 同じ書籍ページに複数の `[OFFICIAL CORRECTION]` が存在しても、それらは別々の公式訂正です。
+
+引用ルール:
+- 資料で確認できた事実には、対応する引用IDを `[C1]` の形式で記載してください。
+- 引用IDは必ず資料中に存在するものだけを使用してください。
+- AIによる一般的な補足や推論には、裏付けのない引用IDを付けてはいけません。
 - `[C1]`、`[C2]` のような形式以外で出典を書いてはいけません。
 - 書籍名やページ番号を回答文中へ直接書く必要はありません。
 - 出典は、その出典によって裏付けられる文章または段落の末尾に記載してください。
 - 同一段落内では、同じ引用IDを繰り返してはいけません。
 - 一つの段落が複数の引用元に基づく場合は、段落末尾に `[C1][C2]` のようにまとめて記載してください。
 - 長い回答では、どの記述がどの根拠に基づくか判別できるよう、必要な段落ごとに引用してください。
+
+資料の読み方:
 - 「索引」や「目次」は検索の手掛かりであり、それ自体をルール本文として扱わないでください。
-- 本文に「○頁参照」「次頁」などがあり、その参照先がコンテキストに含まれる場合は、参照先の内容も確認して回答してください。
+- 本文に「○頁参照」「次頁」などがあり、その参照先が資料に含まれる場合は、参照先の内容も確認して回答してください。
 - 同じ事項について複数の書籍に記載がある場合、基本ルールブックに基本的な定義・数値・種族特徴・ルール本文が存在するなら、原則としてそれを回答の基礎にしてください。
 - サプリメントや追加書籍の記述は、基本ルールを置き換えるものと明記されていない限り、追加情報・補足情報として扱ってください。
 - 質問が希少種、追加種族、追加技能、追加魔法、追加アイテム、追加戦闘特技など、特定の追加要素を明示している場合は、その要素を収録したサプリメント側の記述を優先してください。
 - 基本種と希少種、基本ルールと追加ルールなど、異なる対象を混同しないでください。
-- 表・テーブル・一覧・チャートを求める質問では、原則として表そのものを回答本文へ転記する必要はありません。何の表か、どの範囲を収録しているか、どの出典を参照すべきかを簡潔に説明してください。正確な数値・項目は出典ページを参照できるようにしてください。
-- 表・テーブル・一覧・チャートが複数書籍にある場合は、最初に見つかった1冊だけで回答を終えず、各表の収録範囲を確認してください。より完全・拡張された表がある場合は、それが存在することと収録範囲を回答で明示してください。簡略版・初心者向け・追加範囲の表も、参照価値があれば区別して示してください。
-- 同一テーマについて複数書籍に直接関係する規定・例外・追加ルールがコンテキストにある場合、質問が横断的な情報収集を求めているなら、基本ルールだけで回答を打ち切らず、重複を避けつつ異なる内容を拾ってください。
+- 表・テーブル・一覧・チャートを求める質問では、原則として表そのものを回答本文へ転記する必要はありません。何の表か、どの範囲を収録しているか、どの出典を参照すべきかを簡潔に説明してください。
+- 表・テーブル・一覧・チャートが複数書籍にある場合は、最初に見つかった1冊だけで回答を終えず、各表の収録範囲を確認してください。
+- 同一テーマについて複数書籍に直接関係する規定・例外・追加ルールが資料にある場合、質問が横断的な情報収集を求めているなら、基本ルールだけで回答を打ち切らず、重複を避けつつ異なる内容を拾ってください。
 - 「○○を使った流派はあるか」のような存在確認では、直接一致だけでなく、同義のカテゴリ表記や「流派」「秘伝」など関連する本文から具体例を探してください。
-- 十分な根拠がコンテキストにない場合は、その旨を明確に回答してください。
 
 今回の回答方針:
 {answer_guidance}
@@ -800,7 +812,7 @@ template = """
 これまでの会話:
 {conversation_history}
 
-コンテキスト:
+資料:
 {context}
 
 質問:
@@ -2943,42 +2955,6 @@ def merge_chat_memory_items(
 
 
 # ============================================================
-# Exact-search helpers
-# ============================================================
-
-
-def apply_category_weight(results):
-    return sorted(results, key=get_document_authority, reverse=True)
-
-
-def build_exact_search_items(results, question: str) -> list[dict]:
-    grouped = defaultdict(list)
-    page_order = []
-    for doc in results:
-        key = page_key_from_doc(doc)
-        if key is None:
-            continue
-        if key not in grouped:
-            page_order.append(key)
-        grouped[key].append(doc)
-
-    items = []
-    for key in page_order:
-        docs = grouped[key]
-        best_doc = max(docs, key=lambda doc: chunk_relevance_score(doc, question))
-        items.append(
-            {
-                "doc": best_doc,
-                "mandatory": True,
-                "context_score": chunk_relevance_score(best_doc, question),
-                "reason": f"全文検索: 「{question.strip()}」に一致",
-                "source": "exact",
-            }
-        )
-    return items
-
-
-# ============================================================
 # Official correction context
 # ============================================================
 
@@ -3611,7 +3587,7 @@ def ask_question(
     question = request.question
     books = request.books
     model_name = request.model or "gpt-5.4-nano"
-    mode = request.mode or "rules_strict"
+    # mode は旧クライアント互換のため受け取るが、現在は単一の回答方式へ統合済み。
     initial_k = max(1, int(request.k or 20))
     max_k = HYBRID_CANDIDATE_K
 
@@ -3659,69 +3635,8 @@ def ask_question(
                 ) from exc
         return result
 
-    if mode == "free_chat":
-        system_prompt = (
-            "あなたはソード・ワールド2.5の世界観とルールに精通したAIです。"
-            "ユーザーの質問には必ずSW2.5の文脈で、具体的かつ専門的に回答してください。"
-        )
-        llm = ChatOpenAI(model_name=model_name, temperature=0.7)
-        messages = [SystemMessage(content=system_prompt)]
-        for message in conversation_history:
-            if message["role"] == "user":
-                messages.append(HumanMessage(content=message["content"]))
-            else:
-                messages.append(AIMessage(content=message["content"]))
-        messages.append(HumanMessage(content=question))
-        response = llm.invoke(messages)
-        return finalize_response(QueryResponse(
-            answer=response.content,
-            citations=[],
-            sources=[],
-            model_used=model_name,
-            k_used=0,
-            hybrid_k_used=0,
-            navigation_pages_used=0,
-            structured_pages_used=0,
-            reference_pages_used=0,
-            max_k=0,
-            token_usage=response.response_metadata.get("token_usage", {}),
-        ))
-
-    if mode == "exact_search":
-        keywords = question.strip().split()
-        results = []
-        for doc in search_documents:
-            if books and doc.metadata.get("book") not in books:
-                continue
-            if all(keyword in doc.page_content for keyword in keywords):
-                results.append(doc)
-
-        results = apply_category_weight(results)
-        exact_items = build_exact_search_items(results, question)
-        citations = build_citations(exact_items, question)
-        for citation in citations:
-            citation.used_in_answer = True
-        sources = citations_to_legacy_sources(citations)
-        answer = (
-            "全文検索を実施しました。結果は出典に記載されています。"
-            if sources
-            else "該当はありませんでした。"
-        )
-        return finalize_response(QueryResponse(
-            answer=answer,
-            citations=citations,
-            sources=sources,
-            model_used="AIは使用していません",
-            k_used=0,
-            hybrid_k_used=0,
-            navigation_pages_used=0,
-            structured_pages_used=0,
-            reference_pages_used=0,
-            max_k=0,
-            token_usage={},
-        ))
-
-    # rules_strict
+    # 回答方式は単一モードへ統合済み。
+    # 旧 free_chat / exact_search の分岐は廃止し、常に資料検索 + AI補足で回答する。
     # 掘り下げ時は直近のユーザー質問も検索文脈へ含める。
     # 過去のAI回答は検索語へ混ぜず、回答生成時の会話理解にだけ利用する。
     variants = build_query_variants(search_question)
@@ -3774,21 +3689,8 @@ def ask_question(
     #
     # 原本ページが質問に本当に関連する場合は、通常のbook retrieval
     # / navigation / reference searchから取得される。
-    if not context_items:
-        return finalize_response(QueryResponse(
-            answer="該当する情報が見つかりませんでした。",
-            citations=[],
-            sources=[],
-            model_used=model_name,
-            k_used=0,
-            hybrid_k_used=0,
-            navigation_pages_used=0,
-            structured_pages_used=0,
-            reference_pages_used=0,
-            max_k=max_k,
-            token_usage={},
-        ))
-
+    # 資料が取得できない場合でも、回答自体はAIへ委ねる。
+    # ただしPrompt側で、具体的な数値・条件等を推測して作らないよう制約する。
     citations = build_citations(context_items, search_question)
     citation_id_map = {
         (citation.book, citation.pdf_page): citation.id for citation in citations
@@ -3831,6 +3733,8 @@ def ask_question(
         )
 
     context = "\n\n".join(context_parts)
+    if not context:
+        context = "（収録資料から質問に直接対応する記述を取得できませんでした）"
 
     official_context = build_official_context(
         official_context_items,

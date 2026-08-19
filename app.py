@@ -237,7 +237,6 @@ def ask_question(
     chat_id: str,
     books: list[str],
     model: str,
-    mode: str,
 ) -> str | None:
     try:
         response = requests.post(
@@ -247,7 +246,6 @@ def ask_question(
                 "question": question,
                 "books": books,
                 "model": model,
-                "mode": mode,
                 "k": DEFAULT_HYBRID_K,
                 "chat_id": chat_id,
             },
@@ -769,23 +767,6 @@ selected_model = next(
     if value == selected_model_display
 )
 
-mode_display = st.sidebar.radio(
-    "回答モード",
-    [
-        "🛡️ ルールブックに基づく回答と出典",
-        "🔍 全文検索モード",
-        "💬 AI自由解釈モード",
-    ],
-    index=0,
-)
-
-mode_map = {
-    "🛡️ ルールブックに基づく回答と出典": "rules_strict",
-    "🔍 全文検索モード": "exact_search",
-    "💬 AI自由解釈モード": "free_chat",
-}
-selected_mode = mode_map[mode_display]
-
 st.sidebar.markdown("📚 **検索対象の書籍**")
 selected_books = []
 
@@ -854,23 +835,16 @@ with st.sidebar.expander("ℹ️ 操作説明", expanded=False):
 - 別テーマとして分けたい場合は「＋ 新しいチャット」を使用してください。
 - 左側のチャット履歴を選ぶと、以前の調査を再開できます。
 
-### ルールブックに基づく回答と出典
+### 回答について
 
-- Vector/全文検索に加え、目次・索引を利用して関連ページを検索します。
+- ルールブック・サプリメント・公式エラッタを検索し、確認できた内容を優先して回答します。
+- Vector/文字列検索に加え、目次・索引を利用して関連ページを検索します。
 - 本文中の「○頁参照」「次頁」などの参照先も追跡します。
 - 表・テーブル・一覧の質問では、表本体も追加探索します。
+- 資料で直接確認できない部分でも、数値やルールを捏造しない範囲でAIが補足説明を行うことがあります。
+- 資料に基づく記述には出典リンクが付きます。AIによる補足には、根拠のない出典は付きません。
+- 公式エラッタがある場合は、原本より公式訂正を優先します。
 - 同一チャットでは、会話履歴と過去に参照した資料を保持します。
-
-### 全文検索モード
-
-- 入力したキーワードが本文に出現するページを検索します。
-- AIは使用しません。
-- スペース区切りでAND検索できます。
-
-### AI自由解釈モード
-
-- 保有書籍データを渡さず、AI単体で回答します。
-- 出典や掲載ページの確認には向きません。
 """
     )
 
@@ -1124,7 +1098,6 @@ if question:
                     chat_id=target_chat_id,
                     books=selected_books,
                     model=selected_model,
-                    mode=selected_mode,
                 )
 
             if error:
