@@ -307,20 +307,26 @@ def link_citation_markers(answer: str, citations: list) -> str:
         if not citation:
             return match.group(0)
 
-        book = citation.get("book") or ""
-        display_name = book_display_name_map.get(
-            book,
-            book or f"C{citation_id}",
-        )
-        page = citation.get("page")
+        citation_type = citation.get("type") or citation.get("citation_type") or ""
 
-        if page is not None:
-            label = f"[{display_name} p.{page}]"
+        if citation_type == "official_correction":
+            label = "[公式エラッタ]"
+            target_link = citation.get("source_url") or ""
         else:
-            label = f"[{display_name}]"
+            book = citation.get("book") or ""
+            display_name = book_display_name_map.get(
+                book,
+                book or f"C{citation_id}",
+            )
+            page = citation.get("page")
 
-        pdf_link, image_link = get_citation_links(citation)
-        target_link = pdf_link or image_link
+            if page is not None:
+                label = f"[{display_name} p.{page}]"
+            else:
+                label = f"[{display_name}]"
+
+            pdf_link, image_link = get_citation_links(citation)
+            target_link = pdf_link or image_link
 
         safe_label = html.escape(label)
         if not target_link:
@@ -365,59 +371,113 @@ def calculate_price(model, token_usage):
 
 
 def render_citation(citation: dict):
-    label = get_citation_label(citation)
-    pdf_link, image_link = get_citation_links(citation)
+    citation_type = citation.get("type") or citation.get("citation_type") or ""
     reason = citation.get("reason") or ""
     excerpt = citation.get("excerpt") or ""
     used_in_answer = citation.get("used_in_answer", True)
 
-    safe_label = html.escape(label)
     safe_reason = html.escape(reason)
     safe_excerpt = html.escape(excerpt)
 
     image_html = ""
-    link_html = safe_label
 
-    # 画像サムネイルは従来どおり画像を開く。
-    if image_link:
-        safe_image_link = html.escape(
-            image_link,
-            quote=True,
-        )
+    if citation_type == "official_correction":
+        label = citation.get("label") or "公式エラッタ"
+        source_url = citation.get("source_url") or ""
+        target_book = citation.get("target_book") or ""
+        target_page = citation.get("target_page")
+        operation = citation.get("operation") or ""
 
-        image_html = (
-            f"<a href='{safe_image_link}' "
-            f"target='_blank'>"
-            f"<img src='{safe_image_link}' "
-            f"style='width:110px;"
-            f"border:1px solid #ccc;"
-            f"border-radius:4px;'>"
-            f"</a>"
-        )
+        safe_label = html.escape(label)
+        link_html = safe_label
 
-    # 書籍名＋ページ番号はPDFを開く。
-    if pdf_link:
-        safe_pdf_link = html.escape(
-            pdf_link,
-            quote=True,
-        )
+        if source_url:
+            safe_source_url = html.escape(source_url, quote=True)
+            link_html = (
+                f"<a href='{safe_source_url}' "
+                f"target='_blank' "
+                f"style='text-decoration:none;"
+                f"font-weight:600;'>"
+                f"{safe_label}</a>"
+            )
 
-        link_html = (
-            f"<a href='{safe_pdf_link}' "
-            f"target='_blank' "
-            f"style='text-decoration:none;"
-            f"font-weight:600;'>"
-            f"{safe_label}</a>"
-        )
-    elif image_link:
-        # PDFが存在しない場合のみ画像へfallback。
-        link_html = (
-            f"<a href='{safe_image_link}' "
-            f"target='_blank' "
-            f"style='text-decoration:none;"
-            f"font-weight:600;'>"
-            f"{safe_label}</a>"
-        )
+        details = []
+        if target_book:
+            target_display = book_display_name_map.get(
+                target_book,
+                target_book,
+            )
+            if target_page is not None:
+                details.append(f"対象: {target_display} p.{target_page}")
+            else:
+                details.append(f"対象: {target_display}")
+        if operation:
+            operation_labels = {
+                "replace": "置換",
+                "delete": "削除",
+                "append": "追記",
+            }
+            details.append(
+                "訂正種別: "
+                + operation_labels.get(operation, operation)
+            )
+
+        if details:
+            correction_detail_html = (
+                "<div style='font-size:0.90em;"
+                "margin-top:4px;'>"
+                + html.escape(" / ".join(details))
+                + "</div>"
+            )
+        else:
+            correction_detail_html = ""
+    else:
+        label = get_citation_label(citation)
+        pdf_link, image_link = get_citation_links(citation)
+        safe_label = html.escape(label)
+        link_html = safe_label
+        correction_detail_html = ""
+
+        # 画像サムネイルは従来どおり画像を開く。
+        if image_link:
+            safe_image_link = html.escape(
+                image_link,
+                quote=True,
+            )
+
+            image_html = (
+                f"<a href='{safe_image_link}' "
+                f"target='_blank'>"
+                f"<img src='{safe_image_link}' "
+                f"style='width:110px;"
+                f"border:1px solid #ccc;"
+                f"border-radius:4px;'>"
+                f"</a>"
+            )
+
+        # 書籍名＋ページ番号はPDFを開く。
+        if pdf_link:
+            safe_pdf_link = html.escape(
+                pdf_link,
+                quote=True,
+            )
+
+            link_html = (
+                f"<a href='{safe_pdf_link}' "
+                f"target='_blank' "
+                f"style='text-decoration:none;"
+                f"font-weight:600;'>"
+                f"{safe_label}</a>"
+            )
+        elif image_link:
+            # PDFが存在しない場合のみ画像へfallback。
+            link_html = (
+                f"<a href='{safe_image_link}' "
+                f"target='_blank' "
+                f"style='text-decoration:none;"
+                f"font-weight:600;'>"
+                f"{safe_label}</a>"
+            )
 
     if used_in_answer:
         badge_html = (
@@ -467,6 +527,7 @@ def render_citation(citation: dict):
   <div style="flex:0 0 auto;">{image_html}</div>
   <div style="flex:1;min-width:0;">
     <div>{link_html}{badge_html}</div>
+    {correction_detail_html}
     {reason_html}
     {excerpt_html}
   </div>

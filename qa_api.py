@@ -8,6 +8,7 @@ from typing import List, Optional
 import json
 import os
 import re
+import unicodedata
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
@@ -67,6 +68,17 @@ NAVIGATION_DIR = Path(
 )
 
 HYBRID_CANDIDATE_K = int(os.getenv("HYBRID_CANDIDATE_K", "100"))
+
+OFFICIAL_SEARCH_TOP_K = int(os.getenv("OFFICIAL_SEARCH_TOP_K", "6"))
+OFFICIAL_SEARCH_CANDIDATE_K = int(
+    os.getenv("OFFICIAL_SEARCH_CANDIDATE_K", "100")
+)
+OFFICIAL_RELEVANCE_MIN = float(
+    os.getenv("OFFICIAL_RELEVANCE_MIN", "0.58")
+)
+OFFICIAL_RELEVANCE_RELATIVE = float(
+    os.getenv("OFFICIAL_RELEVANCE_RELATIVE", "0.72")
+)
 
 SOURCE_AUTHORITY_STRENGTH = float(
     os.getenv("SOURCE_AUTHORITY_STRENGTH", "0.20")
@@ -204,12 +216,41 @@ db = FAISS.load_local(
 
 all_index_documents = list(db.docstore._dict.values())
 
-# logical_pageを持たない表紙・カバー等はstrict retrievalから除外する。
-search_documents = [
+# ------------------------------------------------------------
+# Document classes
+# ------------------------------------------------------------
+#
+# 同じFAISSには書籍本文と公式エラッタを格納するが、ページ単位の
+# navigation / reference / structured search に公式エラッタを混ぜない。
+#
+# 旧インデックスとの互換性のため source_class 未設定は book とみなす。
+book_documents = [
     doc
     for doc in all_index_documents
+    if doc.metadata.get("source_class", "book") == "book"
+]
+
+official_documents = [
+    doc
+    for doc in all_index_documents
+    if doc.metadata.get("source_class") == "official_correction"
+]
+
+# logical_pageを持たない表紙・カバー等はstrict retrievalから除外する。
+# 既存コード中の search_documents は「検索可能な書籍本文」を意味する。
+search_documents = [
+    doc
+    for doc in book_documents
     if doc.metadata.get("logical_page") is not None
 ]
+
+print(
+    "Index documents: "
+    f"all={len(all_index_documents)}, "
+    f"book={len(book_documents)}, "
+    f"book_searchable={len(search_documents)}, "
+    f"official={len(official_documents)}"
+)
 
 page_documents_by_pdf = defaultdict(list)
 page_documents_by_logical = defaultdict(list)
@@ -249,6 +290,21 @@ lexical_vectorizer = TfidfVectorizer(
 lexical_matrix = lexical_vectorizer.fit_transform(
     [doc.page_content for doc in search_documents]
 )
+
+# 公式エラッタは書籍本文とは別の語彙空間で検索する。
+# 現段階では /ask のcontextにはまだ合流させない。
+official_lexical_vectorizer = None
+official_lexical_matrix = None
+
+if official_documents:
+    official_lexical_vectorizer = TfidfVectorizer(
+        analyzer="char",
+        ngram_range=(2, 4),
+        min_df=1,
+    )
+    official_lexical_matrix = official_lexical_vectorizer.fit_transform(
+        [doc.page_content for doc in official_documents]
+    )
 
 
 # ============================================================
@@ -357,6 +413,11 @@ class Citation(BaseModel):
     reason: Optional[str] = None
     # True: 回答本文で[Cx]として引用、False: 調査価値の高い関連資料
     used_in_answer: bool = True
+    source_type: str = "book"
+    source_url: Optional[str] = None
+    operation: Optional[str] = None
+    target_book: Optional[str] = None
+    target_page: Optional[int] = None
 
 
 class QueryResponse(BaseModel):
@@ -706,6 +767,13 @@ template = """
 - 過去のAI回答を、ルール・数値・条件・例外などの根拠として扱ってはいけません。
 - 事実関係は、今回取得したコンテキストで確認できた情報だけを根拠にしてください。
 - コンテキストに存在しない情報を推測して補ってはいけません。
+- `GroupSNE公式エラッタ・追加訂正` が含まれる場合、それは対応する書籍本文より新しい公式訂正として優先してください。
+- 公式訂正が `replace` の場合は訂正後を採用し、`delete` の場合は削除対象を現行ルールとして扱わず、`append` の場合は追加内容を現行ルールへ加えてください。
+- `delete` は「情報が見つからない」という意味ではありません。「公式に削除された」という確定情報として回答してください。
+- 公式訂正ブロックに「公式訂正引用ID」がある場合、訂正内容そのものの根拠にはその引用IDを使用してください。原本記述も説明する場合は「対応する原本引用ID」を併記できます。
+- 質問に直接該当する `[OFFICIAL CORRECTION]` が複数ある場合、それらを恣意的に省略してはいけません。特に、複数の `append` が同一テーマに対して適用される場合は、該当する対象をすべて回答へ反映してください。
+- 同じ書籍ページに複数の `[OFFICIAL CORRECTION]` が存在しても、それらは別々の公式訂正です。原本Citationが同じ `[C#]` に集約されていても、公式訂正の対象自体を省略してはいけません。
+- 回答中で複数対象を列挙する場合、`GroupSNE公式エラッタ・追加訂正` に含まれる直接該当項目をすべて列挙してください。
 - 根拠を示す場合は、対応するコンテキストの引用IDを `[C1]` の形式で記載してください。
 - 引用IDは必ずコンテキスト中に存在するものだけを使用してください。
 - `[C1]`、`[C2]` のような形式以外で出典を書いてはいけません。
@@ -1226,10 +1294,57 @@ def build_citations(context_items: list[dict], question: str) -> List[Citation]:
     return citations
 
 
+def build_official_citations(official_items: list[dict], start_id: int) -> List[Citation]:
+    citations = []
+    for item in official_items:
+        doc = item["doc"]
+        resolved = item["resolved"]
+        metadata = doc.metadata
+        target_page = metadata.get("target_page")
+        try:
+            target_page = int(target_page) if target_page is not None else 0
+        except (TypeError, ValueError):
+            target_page = 0
+        target_book = resolved.get("target_book")
+        source_name = metadata.get("source_name") or metadata.get("source_key") or "GroupSNE公式エラッタ・追加訂正"
+        operation = metadata.get("operation") or "unknown"
+        location = metadata.get("location") or ""
+        reason = f"GroupSNE公式エラッタ・追加訂正 / operation={operation}"
+        if location:
+            reason += f" / 対象箇所={location}"
+        citations.append(Citation(
+            id=start_id + len(citations),
+            book=source_name,
+            page=target_page,
+            pdf_page=target_page,
+            category="公式エラッタ・追加訂正",
+            excerpt=build_excerpt_from_text(doc.page_content or "", "", reason),
+            reason=reason,
+            used_in_answer=True,
+            source_type="official_correction",
+            source_url=metadata.get("source_url"),
+            operation=operation,
+            target_book=target_book,
+            target_page=target_page or None,
+        ))
+    return citations
+
+
+def official_citation_id_map(official_items: list[dict], citations: List[Citation]) -> dict:
+    result = {}
+    for item, citation in zip(official_items, citations):
+        result[official_document_key(item["doc"])] = citation.id
+    return result
+
+
 def citations_to_legacy_sources(citations: List[Citation]) -> List[str]:
     result = []
     for citation in citations:
-        if citation.category:
+        if citation.source_type == "official_correction":
+            target = citation.target_book or citation.book
+            page = citation.target_page or citation.page
+            result.append(f"公式エラッタ・追加訂正 / {target} - p.{page}")
+        elif citation.category:
             result.append(f"{citation.category} / {citation.book} - p.{citation.page}")
         else:
             result.append(f"{citation.book} - p.{citation.page}")
@@ -1475,8 +1590,415 @@ def select_return_citations(
 
 
 # ============================================================
+# Official correction target resolution
+# ============================================================
+
+OFFICIAL_SOURCE_KEY_HINTS = {
+    "SW2.5_1": "ルールブック1",
+    "SW2.5_2": "ルールブック2",
+    "SW2.5_3": "ルールブック3",
+    "SW2.5_CBB": "キャラクタービルディングブック",
+    "SW2.5_granzale": "冒険の国グランゼール",
+    "SW2.5_vicecity": "ヴァイスシティ",
+    "SW2.5_epictreasury": "エピックトレジャリー",
+    "SW2.5_kingsfall": "鉄道の都キングスフォール",
+    "SW2.5_daemonsline": "デモンズライン",
+    "SW2.5_monstrouslore": "モンストラスロア",
+    "SW2.5_outlaw": "アウトロープロファイルブック",
+    "SW2.5_magusarts": "メイガスアーツ",
+    "SW2.5_battlemastery": "バトルマスタリー",
+    "SW2.5_burlight": "ブルライト博物誌",
+    "SW2.5_arcanerelik": "アーケインレリック",
+    "SW2.5_raxialife": "ラクシアライフ",
+    "SW2.5_travelsinalfreim": "アルフレイム見聞録",
+    "SW2.5_barbarous": "バルバロスレイジ",
+    "SW2.5_barbarousSaga": "バルバロスサーガ",
+    "SW2.5_abyssbreaker": "アビスブレイカー",
+    "SW2.5_ursyla": "ウルシラ博物誌",
+    "SW2.5_infinite": "インフィニットコロッセオ",
+    "SW2.5_tyrant": "タイラントクリプト",
+    "SW2.5_star": "星座の町サイレックオード",
+}
+
+
+def resolve_official_target_book(doc) -> str | None:
+    source_key = str(doc.metadata.get("source_key") or "").strip()
+    hint = OFFICIAL_SOURCE_KEY_HINTS.get(source_key)
+    if not hint:
+        return None
+
+    matches = [
+        book
+        for book in book_to_category
+        if hint in book
+    ]
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+def official_target_page_documents(doc) -> list:
+    book = resolve_official_target_book(doc)
+    if not book:
+        return []
+
+    target_page = doc.metadata.get("target_page")
+    if target_page is None:
+        return []
+
+    try:
+        target_page = int(target_page)
+    except (TypeError, ValueError):
+        return []
+
+    return list(
+        page_documents_by_logical.get(
+            (book, target_page),
+            []
+        )
+    )
+
+
+def normalize_override_match_text(value: str | None) -> str:
+    value = str(value or "")
+    value = re.sub(r"\s+", "", value)
+    value = re.sub(
+        r"[《》〈〉「」『』\(\)（）\[\]【】・･/／：:。．,.，!?！？\-―—～〜~]",
+        "",
+        value,
+    )
+    return value.lower()
+
+
+def override_text_similarity(needle: str | None, haystack: str | None) -> float:
+    normalized_needle = normalize_override_match_text(needle)
+    normalized_haystack = normalize_override_match_text(haystack)
+
+    if not normalized_needle or not normalized_haystack:
+        return 0.0
+
+    if normalized_needle in normalized_haystack:
+        return 1.0
+
+    coverage = char_ngram_coverage(
+        normalized_needle,
+        normalized_haystack,
+        2,
+    )
+    ratio = SequenceMatcher(
+        None,
+        normalized_needle,
+        normalized_haystack,
+    ).ratio()
+
+    return max(
+        coverage,
+        ratio * 0.70,
+    )
+
+
+def official_target_page_text(doc) -> str:
+    docs = official_target_page_documents(doc)
+    if not docs:
+        return ""
+
+    docs = sorted(
+        docs,
+        key=lambda item: int(item.metadata.get("chunk", 0)),
+    )
+
+    return "\n".join(
+        item.page_content or ""
+        for item in docs
+    )
+
+
+def best_official_target_chunk(doc, query_text: str | None):
+    docs = official_target_page_documents(doc)
+    if not docs:
+        return None
+
+    if not query_text:
+        return docs[0]
+
+    return max(
+        docs,
+        key=lambda item: override_text_similarity(
+            query_text,
+            item.page_content or "",
+        ),
+    )
+
+
+def is_short_override_token(value: str | None) -> bool:
+    normalized = normalize_override_match_text(value)
+    return len(normalized) <= 4
+
+
+def resolve_official_override(doc) -> dict:
+    target_book = resolve_official_target_book(doc)
+    target_page = doc.metadata.get("target_page")
+    operation = doc.metadata.get("operation")
+
+    before = doc.metadata.get("before")
+    after = doc.metadata.get("after")
+    location = doc.metadata.get("location")
+    delete_text = doc.metadata.get("delete_text")
+
+    page_docs = official_target_page_documents(doc)
+
+    base = {
+        "official_doc": doc,
+        "target_book": target_book,
+        "target_page": target_page,
+        "operation": operation,
+        "best_book_doc": None,
+        "before_similarity": 0.0,
+        "after_similarity": 0.0,
+        "location_similarity": 0.0,
+        "delete_similarity": 0.0,
+        "match_score": 0.0,
+    }
+
+    if not target_book:
+        return {**base, "match_status": "NO_BOOK_MAPPING"}
+
+    if target_page is None:
+        return {**base, "match_status": "NO_TARGET_PAGE"}
+
+    if not page_docs:
+        return {**base, "match_status": "TARGET_PAGE_NOT_INDEXED"}
+
+    page_text = official_target_page_text(doc)
+
+    before_similarity = override_text_similarity(before, page_text)
+    after_similarity = override_text_similarity(after, page_text)
+    location_similarity = override_text_similarity(location, page_text)
+    delete_similarity = override_text_similarity(delete_text, page_text)
+
+    anchor_text = before or location or delete_text or after
+    best_doc = best_official_target_chunk(doc, anchor_text)
+
+    if operation == "replace":
+        # OCR済み原本が既に訂正版の場合を検出する。
+        #
+        # 文字認識揺れがあるためafter完全一致だけを要求しない。
+        # beforeよりafterが明確に強く、before側が弱い場合は
+        # ALREADY_APPLIEDとみなす。
+        already_applied = (
+            (
+                after_similarity >= 0.90
+                and before_similarity < 0.65
+            )
+            or (
+                after_similarity >= 0.65
+                and before_similarity <= 0.55
+                and (
+                    after_similarity
+                    - before_similarity
+                ) >= 0.15
+            )
+        )
+
+        if already_applied:
+            status = "ALREADY_APPLIED"
+            match_score = after_similarity
+        else:
+            match_score = (
+                before_similarity * 0.80
+                + location_similarity * 0.20
+            )
+
+            if before_similarity >= 0.90 and match_score >= 0.80:
+                status = "MATCHED_STRONG"
+            elif match_score >= 0.50:
+                status = "MATCHED_WEAK"
+            else:
+                status = "PAGE_ONLY"
+
+    elif operation == "delete":
+        if is_short_override_token(delete_text):
+            match_score = location_similarity
+        else:
+            match_score = (
+                delete_similarity * 0.65
+                + location_similarity * 0.35
+            )
+
+        if (
+            location_similarity >= 0.80
+            and (
+                delete_similarity >= 0.80
+                or is_short_override_token(delete_text)
+            )
+        ):
+            status = "MATCHED_STRONG"
+        elif match_score >= 0.45:
+            status = "MATCHED_WEAK"
+        else:
+            status = "PAGE_ONLY"
+
+    elif operation == "append":
+        match_score = location_similarity
+
+        if location_similarity >= 0.85:
+            status = "MATCHED_STRONG"
+        elif location_similarity >= 0.45:
+            status = "MATCHED_WEAK"
+        else:
+            status = "PAGE_ONLY"
+
+    else:
+        match_score = max(
+            before_similarity,
+            after_similarity,
+            location_similarity,
+        )
+
+        if match_score >= 0.85:
+            status = "MATCHED_STRONG"
+        elif match_score >= 0.50:
+            status = "MATCHED_WEAK"
+        else:
+            status = "PAGE_ONLY"
+
+    return {
+        **base,
+        "best_book_doc": best_doc,
+        "before_similarity": before_similarity,
+        "after_similarity": after_similarity,
+        "location_similarity": location_similarity,
+        "delete_similarity": delete_similarity,
+        "match_score": match_score,
+        "match_status": status,
+    }
+
+
+# ============================================================
 # Search helpers
 # ============================================================
+
+
+def is_book_document(doc) -> bool:
+    return doc.metadata.get("source_class", "book") == "book"
+
+
+def is_official_document(doc) -> bool:
+    return doc.metadata.get("source_class") == "official_correction"
+
+
+def official_document_key(doc):
+    return (
+        doc.metadata.get("chunk_id"),
+        doc.metadata.get("source_key"),
+        doc.metadata.get("record_index"),
+    )
+
+
+def official_lexical_search(query: str, top_k: int):
+    if (
+        not official_documents
+        or official_lexical_vectorizer is None
+        or official_lexical_matrix is None
+    ):
+        return []
+
+    query_vector = official_lexical_vectorizer.transform([query])
+    scores = cosine_similarity(
+        query_vector,
+        official_lexical_matrix,
+    ).flatten()
+    sorted_indices = scores.argsort()[::-1]
+    results = []
+
+    for index in sorted_indices:
+        score = float(scores[index])
+        if score <= 0:
+            break
+        results.append((official_documents[index], score))
+        if len(results) >= top_k:
+            break
+
+    return results
+
+
+def official_search(
+    query: str,
+    top_k: int = 20,
+    candidate_k: int = 100,
+    variants: Optional[list[str]] = None,
+):
+    """公式エラッタだけをvector + lexicalのRRFで検索する。
+
+    現段階では結果を /ask context へは入れない。
+    次段階のOfficial Override Resolver用の独立検索口。
+    """
+    if not official_documents:
+        return []
+
+    query_variants = variants or build_query_variants(query)
+    scores_by_key = defaultdict(float)
+    docs_by_key = {}
+    reasons_by_key = defaultdict(list)
+    rrf_k = 60.0
+    vector_weight = 0.40
+    lexical_weight = 0.60
+
+    for search_query in query_variants:
+        # FAISS自体はbook/official共通なので、取得後にofficialだけへ絞る。
+        # officialが601件と少ないため、book検索より広めに候補を取得する。
+        vector_results = db.similarity_search_with_score(
+            search_query,
+            k=max(candidate_k, 200),
+        )
+        vector_position = 0
+        for doc, _distance in vector_results:
+            if not is_official_document(doc):
+                continue
+            vector_position += 1
+            key = official_document_key(doc)
+            docs_by_key[key] = doc
+            scores_by_key[key] += vector_weight / (rrf_k + vector_position)
+            if vector_position <= 15:
+                reasons_by_key[key].append(
+                    f"公式ベクトル検索 #{vector_position}（{search_query}）"
+                )
+
+        lexical_results = official_lexical_search(
+            search_query,
+            candidate_k,
+        )
+        for lexical_position, (doc, _score) in enumerate(
+            lexical_results,
+            start=1,
+        ):
+            key = official_document_key(doc)
+            docs_by_key[key] = doc
+            scores_by_key[key] += lexical_weight / (rrf_k + lexical_position)
+            if lexical_position <= 15:
+                reasons_by_key[key].append(
+                    f"公式文字列検索 #{lexical_position}（{search_query}）"
+                )
+
+    scored = []
+    for key, score in scores_by_key.items():
+        doc = docs_by_key[key]
+        scored.append((doc, score, reasons_by_key[key]))
+
+    scored.sort(key=lambda item: item[1], reverse=True)
+
+    result = []
+    for doc, score, reasons in scored[:top_k]:
+        result.append(
+            {
+                "doc": doc,
+                "retrieval_score": score,
+                "reason": "公式エラッタ検索（" + " / ".join(reasons[:3]) + "）",
+            }
+        )
+    return result
 
 
 def definition_search(query: str, top_k: int, books=None):
@@ -1554,6 +2076,9 @@ def hybrid_search(
         vector_results = db.similarity_search_with_score(search_query, k=candidate_k)
         vector_position = 0
         for doc, _distance in vector_results:
+            # 通常Hybridは書籍本文専用。公式エラッタはofficial_search()で別取得する。
+            if not is_book_document(doc):
+                continue
             if get_logical_page(doc) is None:
                 continue
             if books and doc.metadata.get("book") not in books:
@@ -2443,6 +2968,623 @@ def build_exact_search_items(results, question: str) -> list[dict]:
 
 
 # ============================================================
+# Official correction context
+# ============================================================
+
+
+def official_doc_allowed_for_books(doc, books: Optional[List[str]]) -> bool:
+    if not books:
+        return True
+
+    target_book = resolve_official_target_book(doc)
+
+    # 対応書籍が解決できる場合は、ユーザーの書籍フィルタに従う。
+    if target_book:
+        return target_book in books
+
+    # 対応書籍が未収録の場合は、書籍フィルタ指定時には混ぜない。
+    return False
+
+
+def normalize_official_relevance_text(value: str | None) -> str:
+    value = unicodedata.normalize(
+        "NFKC",
+        str(value or ""),
+    )
+    value = re.sub(r"\s+", "", value)
+    value = re.sub(
+        r"[《》〈〉「」『』\(\)（）\[\]【】・･/／：:。．,.，!?！？\-―—～〜~]",
+        "",
+        value,
+    )
+    return value.lower()
+
+
+def normalize_official_question_for_terms(question: str) -> str:
+    value = unicodedata.normalize(
+        "NFKC",
+        str(question or ""),
+    )
+
+    value = re.sub(
+        r"(について|に関して|に関する)\s*(教えてください|教えて|知りたいです|知りたい)?[。.!！?？]*$",
+        "",
+        value,
+    )
+    value = re.sub(
+        r"(とは)?\s*(何ですか|なんですか|何でしょうか|どうなりますか|どうですか)[。.!！?？]*$",
+        "",
+        value,
+    )
+    value = re.sub(
+        r"(を)?\s*(教えてください|教えて|知りたいです|知りたい)[。.!！?？]*$",
+        "",
+        value,
+    )
+    value = re.sub(
+        r"[。.!！?？]+$",
+        "",
+        value,
+    )
+
+    return value.strip()
+
+
+def official_query_terms(question: str) -> list[str]:
+    cleaned_question = normalize_official_question_for_terms(
+        question
+    )
+
+    terms = extract_query_terms(cleaned_question)
+    normalized = []
+
+    for term in terms:
+        term = re.sub(
+            r"(?:は|が|を|に|で|と|の)$",
+            "",
+            term,
+        ).strip()
+
+        value = normalize_official_relevance_text(term)
+        if value and value not in normalized:
+            normalized.append(value)
+
+    whole = normalize_official_relevance_text(
+        cleaned_question
+    )
+    if whole and whole not in normalized:
+        normalized.insert(0, whole)
+
+    return normalized
+
+
+def official_candidate_haystack(doc) -> str:
+    metadata = doc.metadata
+    values = [
+        doc.page_content or "",
+        metadata.get("location") or "",
+        metadata.get("before") or "",
+        metadata.get("after") or "",
+        metadata.get("append_text") or "",
+        metadata.get("delete_text") or "",
+        metadata.get("source_key") or "",
+        metadata.get("source_name") or "",
+    ]
+    return normalize_official_relevance_text(
+        "\n".join(str(value) for value in values if value)
+    )
+
+
+def official_candidate_relevance(
+    question: str,
+    doc,
+) -> dict:
+    terms = official_query_terms(question)
+    haystack = official_candidate_haystack(doc)
+
+    if not terms or not haystack:
+        return {
+            "score": 0.0,
+            "matched_terms": [],
+            "term_scores": [],
+            "whole_match": False,
+        }
+
+    whole = normalize_official_relevance_text(
+        normalize_official_question_for_terms(
+            question
+        )
+    )
+    whole_match = bool(
+        whole
+        and len(whole) >= 4
+        and whole in haystack
+    )
+
+    term_scores = []
+    matched_terms = []
+
+    for term in terms:
+        if not term:
+            continue
+
+        if term in haystack:
+            score = 1.0
+        elif len(term) >= 2:
+            score = char_ngram_coverage(
+                term,
+                haystack,
+                2,
+            )
+        else:
+            score = 0.0
+
+        term_scores.append(score)
+
+        if score >= 0.72:
+            matched_terms.append(term)
+
+    if not term_scores:
+        relevance = 0.0
+    elif len(term_scores) == 1:
+        relevance = term_scores[0]
+    else:
+        relevance = (
+            min(term_scores) * 0.65
+            + (
+                sum(term_scores)
+                / len(term_scores)
+            ) * 0.35
+        )
+
+    if whole_match:
+        relevance = max(
+            relevance,
+            1.0,
+        )
+
+    return {
+        "score": relevance,
+        "matched_terms": matched_terms,
+        "term_scores": term_scores,
+        "whole_match": whole_match,
+    }
+
+
+def select_official_context_items(
+    *,
+    question: str,
+    books: Optional[List[str]],
+    variants: Optional[list[str]] = None,
+) -> list[dict]:
+    query_variants = variants or build_query_variants(question)
+    merged = {}
+
+    for variant in query_variants:
+        results = official_search(
+            variant,
+            top_k=max(
+                OFFICIAL_SEARCH_TOP_K * 3,
+                12,
+            ),
+            candidate_k=OFFICIAL_SEARCH_CANDIDATE_K,
+        )
+
+        for item in results:
+            doc = item["doc"]
+
+            if not official_doc_allowed_for_books(doc, books):
+                continue
+
+            chunk_id = (
+                doc.metadata.get("chunk_id")
+                or doc.metadata.get("id")
+            )
+            key = chunk_id or document_key(doc)
+
+            relevance = official_candidate_relevance(
+                question,
+                doc,
+            )
+            resolved = resolve_official_override(doc)
+
+            candidate = {
+                "doc": doc,
+                "resolved": resolved,
+                "retrieval_score": float(
+                    item.get("retrieval_score", 0.0)
+                ),
+                "relevance_score": float(
+                    relevance["score"]
+                ),
+                "relevance_terms": relevance["matched_terms"],
+                "relevance_term_scores": relevance["term_scores"],
+                "whole_query_match": relevance["whole_match"],
+                "reason": item.get(
+                    "reason",
+                    "公式エラッタ検索",
+                ),
+                "query_variant": variant,
+            }
+
+            existing = merged.get(key)
+
+            candidate_sort_key = (
+                candidate["relevance_score"],
+                candidate["retrieval_score"],
+            )
+            existing_sort_key = (
+                (
+                    existing["relevance_score"],
+                    existing["retrieval_score"],
+                )
+                if existing is not None
+                else (-1.0, -1.0)
+            )
+
+            if candidate_sort_key > existing_sort_key:
+                merged[key] = candidate
+
+    candidates = list(
+        merged.values()
+    )
+
+    if not candidates:
+        return []
+
+    candidates.sort(
+        key=lambda item: (
+            item["relevance_score"],
+            item["retrieval_score"],
+        ),
+        reverse=True,
+    )
+
+    best_relevance = candidates[0]["relevance_score"]
+
+    threshold = max(
+        OFFICIAL_RELEVANCE_MIN,
+        best_relevance * OFFICIAL_RELEVANCE_RELATIVE,
+    )
+
+    selected = [
+        item
+        for item in candidates
+        if item["relevance_score"] >= threshold
+    ]
+
+    whole_matches = [
+        item
+        for item in selected
+        if item["whole_query_match"]
+    ]
+    if whole_matches:
+        selected = whole_matches
+
+    selected.sort(
+        key=lambda item: (
+            item["relevance_score"],
+            item["retrieval_score"],
+        ),
+        reverse=True,
+    )
+
+    return selected[:OFFICIAL_SEARCH_TOP_K]
+
+
+def official_target_anchor_text(doc) -> str:
+    metadata = doc.metadata
+    operation = metadata.get("operation")
+
+    if operation == "replace":
+        return (
+            metadata.get("before")
+            or metadata.get("location")
+            or metadata.get("after")
+            or ""
+        )
+
+    if operation == "delete":
+        return (
+            metadata.get("location")
+            or metadata.get("delete_text")
+            or ""
+        )
+
+    if operation == "append":
+        return (
+            metadata.get("location")
+            or metadata.get("append_text")
+            or ""
+        )
+
+    return (
+        metadata.get("location")
+        or metadata.get("before")
+        or metadata.get("after")
+        or ""
+    )
+
+
+def build_official_target_context_items(
+    official_items: list[dict],
+    question: str,
+) -> list[dict]:
+    selected = []
+    seen_pages = set()
+
+    for official_item in official_items:
+        doc = official_item["doc"]
+        resolved = official_item["resolved"]
+
+        target_book = resolved.get("target_book")
+        target_page = resolved.get("target_page")
+
+        if not target_book or target_page is None:
+            continue
+
+        page_docs = official_target_page_documents(doc)
+        if not page_docs:
+            continue
+
+        anchor = official_target_anchor_text(doc)
+
+        scored = []
+        for page_doc in page_docs:
+            anchor_score = override_text_similarity(
+                anchor,
+                page_doc.page_content or "",
+            )
+            question_score = chunk_relevance_score(
+                page_doc,
+                question,
+                extra_terms=extract_query_terms(question),
+            )
+
+            score = (
+                anchor_score * 1000.0
+                + question_score
+            )
+            scored.append(
+                (
+                    score,
+                    anchor_score,
+                    page_doc,
+                )
+            )
+
+        scored.sort(
+            key=lambda value: (
+                value[0],
+                -int(value[2].metadata.get("chunk", 0)),
+            ),
+            reverse=True,
+        )
+
+        if not scored:
+            continue
+
+        _best_score, anchor_score, best_doc = scored[0]
+        pdf_page = get_pdf_page(best_doc)
+        logical_page = get_logical_page(best_doc)
+
+        if pdf_page is None or logical_page is None:
+            continue
+
+        page_key = (
+            target_book,
+            pdf_page,
+        )
+
+        if page_key in seen_pages:
+            continue
+        seen_pages.add(page_key)
+
+        operation = doc.metadata.get("operation") or "unknown"
+        location = doc.metadata.get("location") or ""
+
+        reason = (
+            f"公式エラッタ対象原本: {target_book} p.{logical_page}"
+            f" / operation={operation}"
+        )
+        if location:
+            reason += f" / 対象箇所={location}"
+
+        selected.append(
+            {
+                "doc": best_doc,
+                "mandatory": True,
+                "context_score": (
+                    2500.0
+                    + float(
+                        official_item.get(
+                            "relevance_score",
+                            0.0,
+                        )
+                    ) * 500.0
+                    + anchor_score * 250.0
+                ),
+                "reason": reason,
+                "source": "official_target",
+            }
+        )
+
+    selected.sort(
+        key=lambda item: item["context_score"],
+        reverse=True,
+    )
+
+    return selected
+
+
+def merge_official_target_context_items(
+    context_items: list[dict],
+    official_target_items: list[dict],
+) -> list[dict]:
+    selected = []
+    seen = set()
+
+    for item in official_target_items + context_items:
+        key = document_key(item["doc"])
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+
+        if len(selected) >= CONTEXT_MAX_DOCS:
+            break
+
+    return selected
+
+
+def official_target_citation_id(
+    item: dict,
+    citation_id_map: dict,
+) -> int | None:
+    resolved = item["resolved"]
+    best_doc = resolved.get("best_book_doc")
+
+    if best_doc is None:
+        target_docs = official_target_page_documents(item["doc"])
+        if target_docs:
+            best_doc = target_docs[0]
+
+    if best_doc is None:
+        return None
+
+    book = best_doc.metadata.get("book")
+    pdf_page = get_pdf_page(best_doc)
+
+    if not book or pdf_page is None:
+        return None
+
+    return citation_id_map.get(
+        (book, pdf_page)
+    )
+
+
+def format_official_context_item(
+    item: dict,
+    citation_id_map: Optional[dict] = None,
+    official_citation_ids: Optional[dict] = None,
+) -> str:
+    doc = item["doc"]
+    resolved = item["resolved"]
+
+    metadata = doc.metadata
+    source_name = metadata.get("source_name") or metadata.get("source_key") or "GroupSNE公式"
+    source_key = metadata.get("source_key") or "不明"
+    target_page = metadata.get("target_page")
+    operation = metadata.get("operation") or "unknown"
+    location = metadata.get("location")
+    source_url = metadata.get("source_url")
+
+    official_citation_id = None
+    if official_citation_ids:
+        official_citation_id = official_citation_ids.get(official_document_key(doc))
+
+    lines = [
+        "[OFFICIAL CORRECTION]",
+    ]
+    if official_citation_id is not None:
+        lines.append(f"公式訂正引用ID: [C{official_citation_id}]")
+    lines.extend([
+        f"公式資料: {source_name}",
+        f"source_key: {source_key}",
+        f"対象ページ: {target_page if target_page is not None else 'ページ指定なし'}",
+        f"operation: {operation}",
+        f"resolver_status: {resolved.get('match_status')}",
+        f"resolver_score: {resolved.get('match_score', 0.0):.4f}",
+    ])
+
+    target_book = resolved.get("target_book")
+    if target_book:
+        lines.append(f"対応書籍: {target_book}")
+
+    if location:
+        lines.append(f"対象箇所: {location}")
+
+    if source_url:
+        lines.append(f"公式URL: {source_url}")
+
+    target_citation_id = None
+    if citation_id_map:
+        target_citation_id = official_target_citation_id(
+            item,
+            citation_id_map,
+        )
+
+    if target_citation_id is not None:
+        lines.append(
+            f"対応する原本引用ID: [C{target_citation_id}]"
+        )
+        if official_citation_id is not None:
+            lines.append(
+                "公式訂正そのものを根拠として使う場合は "
+                f"[C{official_citation_id}] を引用し、原本記述も併記する場合は "
+                f"[C{target_citation_id}] も使用してください。"
+            )
+
+    # chunk builderで作った自然文をそのまま使う。
+    lines.append("公式訂正内容:")
+    lines.append(doc.page_content or "")
+
+    if operation == "delete":
+        delete_text = metadata.get("delete_text")
+        lines.append(
+            "現行ルール上の扱い: この訂正は削除指示です。"
+            "削除対象が原本に記載されていても、"
+            "現行ルールの有効な項目・効果として扱わないでください。"
+        )
+        if delete_text:
+            lines.append(
+                f"削除対象の明示: {delete_text}"
+            )
+    elif operation == "replace":
+        lines.append(
+            "現行ルール上の扱い: 訂正前ではなく訂正後の内容を採用してください。"
+        )
+    elif operation == "append":
+        lines.append(
+            "現行ルール上の扱い: 原本内容にこの追記を加えて解釈してください。"
+        )
+
+    status = resolved.get("match_status")
+    if status == "ALREADY_APPLIED":
+        lines.append(
+            "適用状態: 所有しているOCR本文は、すでに訂正後内容を含む可能性が高い。"
+        )
+    elif status in {"MATCHED_STRONG", "MATCHED_WEAK", "PAGE_ONLY"}:
+        lines.append(
+            "適用状態: 回答ではこの公式訂正を原本記述より優先する。"
+        )
+    else:
+        lines.append(
+            "適用状態: 原本との自動対応は未確定だが、GroupSNE公式訂正として扱う。"
+        )
+
+    return "\n".join(lines)
+
+
+def build_official_context(
+    items: list[dict],
+    citation_id_map: Optional[dict] = None,
+    official_citation_ids: Optional[dict] = None,
+) -> str:
+    if not items:
+        return ""
+
+    return "\n\n".join(
+        format_official_context_item(
+            item,
+            citation_id_map=citation_id_map,
+            official_citation_ids=official_citation_ids,
+        )
+        for item in items
+    )
+
+
+# ============================================================
 # /ask
 # ============================================================
 
@@ -2580,6 +3722,13 @@ def ask_question(
         books=books,
         variants=variants,
     )
+
+    official_context_items = select_official_context_items(
+        question=search_question,
+        books=books,
+        variants=variants,
+    )
+
     navigation_pages, _exact_index_match = navigation_search(
         query=search_question,
         books=books,
@@ -2605,6 +3754,15 @@ def ask_question(
     )
     context_items = merge_chat_memory_items(context_items, memory_items)
 
+    official_target_items = build_official_target_context_items(
+        official_context_items,
+        search_question,
+    )
+    context_items = merge_official_target_context_items(
+        context_items,
+        official_target_items,
+    )
+
     if not context_items:
         return finalize_response(QueryResponse(
             answer="該当する情報が見つかりませんでした。",
@@ -2624,6 +3782,15 @@ def ask_question(
     citation_id_map = {
         (citation.book, citation.pdf_page): citation.id for citation in citations
     }
+    official_citations = build_official_citations(
+        official_context_items,
+        start_id=len(citations) + 1,
+    )
+    official_citation_ids = official_citation_id_map(
+        official_context_items,
+        official_citations,
+    )
+    citations.extend(official_citations)
 
     context_parts = []
     for item in context_items:
@@ -2653,6 +3820,23 @@ def ask_question(
         )
 
     context = "\n\n".join(context_parts)
+
+    official_context = build_official_context(
+        official_context_items,
+        citation_id_map=citation_id_map,
+        official_citation_ids=official_citation_ids,
+    )
+
+    if official_context:
+        context = (
+            context
+            + "\n\n"
+            + "=== GroupSNE公式エラッタ・追加訂正 ===\n"
+            + "以下の公式訂正は、対応する原本記述より優先してください。\n"
+            + "原本本文と矛盾する場合は公式訂正を採用してください。\n\n"
+            + official_context
+        )
+
     full_prompt = prompt.format(
         context=context,
         question=question,
