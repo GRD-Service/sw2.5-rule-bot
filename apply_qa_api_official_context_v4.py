@@ -132,7 +132,7 @@ def official_query_terms(question: str) -> list[str]:
     args.output.write_text(
         text,
         encoding="utf-8",
-        newline="\\n",
+        newline="\n",
     )
 
     print(args.output)
