@@ -3023,7 +3023,7 @@ def normalize_official_question_for_terms(question: str) -> str:
         value,
     )
     value = re.sub(
-        r"(とは)?\s*(何ですか|なんですか|何でしょうか|どうなりますか|どうですか)[。.!！?？]*$",
+        r"(とは)?\s*(何ですか|なんですか|何でしょうか|どうなりますか|どうなっていますか|どうなってますか|どうですか)[。.!！?？]*$",
         "",
         value,
     )
