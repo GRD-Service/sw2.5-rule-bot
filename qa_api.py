@@ -93,6 +93,7 @@ NAV_CHUNKS_PER_PAGE = int(os.getenv("NAV_CHUNKS_PER_PAGE", "2"))
 
 # 検索再現率を維持しつつ、表・参照先・複数書籍を同時に入れられるよう少し余裕を持たせる。
 CONTEXT_MAX_DOCS = int(os.getenv("CONTEXT_MAX_DOCS", "28"))
+HYBRID_CONTEXT_MIN_DOCS = int(os.getenv("HYBRID_CONTEXT_MIN_DOCS", "8"))
 
 NAV_INDEX_FUZZY_THRESHOLD = float(
     os.getenv("NAV_INDEX_FUZZY_THRESHOLD", "0.72")
@@ -2950,10 +2951,13 @@ def build_context_items(
     mandatory_items = [item for item in all_special_items if item["mandatory"]]
     optional_special = [item for item in all_special_items if not item["mandatory"]]
 
-    # reference > structured > navigationの順に最低1chunkを保護する。
+    # navigation / reference / structured と hybrid はスコア尺度が異なるため、
+    # 単純に同一poolで競わせるとhybrid本文が最終contextから消える。
+    #
+    # そこで、special系のmandatoryを保護しつつ、hybrid本文にも最低枠を予約する。
     mandatory_items.sort(key=lambda item: item["context_score"], reverse=True)
-    optional_pool = optional_special + hybrid_context_items
-    optional_pool.sort(key=lambda item: item["context_score"], reverse=True)
+    optional_special.sort(key=lambda item: item["context_score"], reverse=True)
+    hybrid_context_items.sort(key=lambda item: item["context_score"], reverse=True)
 
     selected = []
     seen = set()
@@ -2966,12 +2970,49 @@ def build_context_items(
         selected.append(item)
         return True
 
+    hybrid_reserve = max(
+        0,
+        min(
+            HYBRID_CONTEXT_MIN_DOCS,
+            CONTEXT_MAX_DOCS,
+            len(hybrid_context_items),
+        ),
+    )
+    mandatory_limit = max(
+        0,
+        CONTEXT_MAX_DOCS - hybrid_reserve,
+    )
+
+    # まずspecial系mandatoryを、hybrid予約枠を潰さない範囲で採用する。
+    for item in mandatory_items:
+        if len(selected) >= mandatory_limit:
+            break
+        add_item(item)
+
+    # 次にhybrid上位を最低枠ぶん確保する。
+    hybrid_added = 0
+    for item in hybrid_context_items:
+        if len(selected) >= CONTEXT_MAX_DOCS:
+            break
+        if add_item(item):
+            hybrid_added += 1
+        if hybrid_added >= hybrid_reserve:
+            break
+
+    # まだ空きがあれば、残りmandatoryを追加する。
     for item in mandatory_items:
         if len(selected) >= CONTEXT_MAX_DOCS:
             break
         add_item(item)
 
-    for item in optional_pool:
+    # 最後にoptional specialと残りhybridを同数値比較せず、順番に補完する。
+    # 先にspecial補完、その後にhybrid残りを入れる。
+    for item in optional_special:
+        if len(selected) >= CONTEXT_MAX_DOCS:
+            break
+        add_item(item)
+
+    for item in hybrid_context_items:
         if len(selected) >= CONTEXT_MAX_DOCS:
             break
         add_item(item)
