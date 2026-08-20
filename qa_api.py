@@ -105,12 +105,6 @@ CITATION_EXCERPT_CHARS = int(os.getenv("CITATION_EXCERPT_CHARS", "360"))
 # Query expansion
 QUERY_VARIANT_MAX = int(os.getenv("QUERY_VARIANT_MAX", "6"))
 
-# 同一チャット内の追質問を、検索・回答用の単独質問へ書き換える。
-CHAT_QUERY_REWRITE_MODEL = os.getenv("CHAT_QUERY_REWRITE_MODEL", "gpt-5.4-nano")
-CHAT_QUERY_REWRITE_MAX_USER_TURNS = int(
-    os.getenv("CHAT_QUERY_REWRITE_MAX_USER_TURNS", "6")
-)
-
 # 表・一覧・チャート検索
 STRUCTURED_MAX_PAGES = int(os.getenv("STRUCTURED_MAX_PAGES", "8"))
 STRUCTURED_PAGES_PER_BOOK = int(os.getenv("STRUCTURED_PAGES_PER_BOOK", "2"))
@@ -813,6 +807,12 @@ template = """
 - サプリメントや追加書籍の記述は、基本ルールを置き換えるものと明記されていない限り、追加情報・補足情報として扱ってください。
 - 質問が希少種、追加種族、追加技能、追加魔法、追加アイテム、追加戦闘特技など、特定の追加要素を明示している場合は、その要素を収録したサプリメント側の記述を優先してください。
 - 基本種と希少種、基本ルールと追加ルールなど、異なる対象を混同しないでください。
+- 資料中に複数の種族・技能・魔法・アイテム・流派・表項目が並んでいる場合、近くに書かれているという理由だけで所属関係を推測してはいけません。
+- 一覧や列挙を回答する場合は、各項目が質問対象に属することを本文の見出し・名称・説明・表の列見出しなどから個別に確認してください。
+- 「Aの希少種」「Aの特殊神聖魔法」「Aの流派」など所属関係を答える場合、Aとの対応が資料中で明示されていない項目を含めてはいけません。
+- ページ内に複数の見出しや並列表がある場合、OCR上で文字が近接していても別項目の可能性があります。質問対象と一致する見出し・名称を優先し、別見出しの内容を混ぜないでください。
+- 列挙の冒頭で「2つ」「3種類」「以下の3点」など件数を明示する場合、実際に列挙する件数と必ず一致させてください。一致を確認できない場合は件数を断定せず「次のものがあります」「確認できるものは以下です」と表現してください。
+- 一部しか確認できない場合は、「少なくとも」「確認できる範囲では」と明示してください。確認できない項目を推測で補完してはいけません。
 - 表・テーブル・一覧・チャートを求める質問では、原則として表そのものを回答本文へ転記する必要はありません。何の表か、どの範囲を収録しているか、どの出典を参照すべきかを簡潔に説明してください。
 - 表・テーブル・一覧・チャートが複数書籍にある場合は、最初に見つかった1冊だけで回答を終えず、各表の収録範囲を確認してください。
 - 同一テーマについて複数書籍に直接関係する規定・例外・追加ルールが資料にある場合、質問が横断的な情報収集を求めているなら、基本ルールだけで回答を打ち切らず、重複を避けつつ異なる内容を拾ってください。
@@ -827,23 +827,14 @@ template = """
 資料:
 {context}
 
-ユーザーが今回入力した質問:
+質問:
 {question}
-
-会話文脈を補完した今回の回答対象:
-{resolved_question}
-
-回答時の注意:
-- 回答対象は「会話文脈を補完した今回の回答対象」です。
-- ユーザーが今回入力した質問だけを一般論として再解釈してはいけません。
-- 過去の話題を最初から説明し直さず、今回の回答対象へ直接答えてください。
 """
 
 prompt = PromptTemplate(
     input_variables=[
         "context",
         "question",
-        "resolved_question",
         "answer_guidance",
         "conversation_history",
     ],
@@ -893,81 +884,27 @@ def build_contextual_search_question(
     question: str,
     history: list[dict],
 ) -> str:
-    """
-    同一チャットの現在質問を、検索と最終回答の双方で使える単独質問へ書き換える。
-
-    設計前提:
-    - 同じチャットは同じ話題の継続。
-    - 新しい話題はUIの「新しいチャット」で開始する。
-    - 質問文の形から「追質問かどうか」は判定しない。
-    - 過去のAI回答は書き換え材料に使わず、ユーザー質問だけを使う。
-    - 新しいルール事実は補わず、省略された対象・主題だけを復元する。
-    """
+    """指示語を含む追質問だけ直前のユーザー質問で補う。"""
     current = str(question or "").strip()
     if not current:
         return current
 
-    previous_questions = [
-        str(message.get("content") or "").strip()
-        for message in history
-        if message.get("role") == "user"
-        and str(message.get("content") or "").strip()
-    ]
+    referential_terms = (
+        "それ", "その", "これ", "この", "あれ", "あの",
+        "前述", "上記", "先ほど", "さっき", "場合",
+    )
+    if not any(term in current for term in referential_terms):
+        return current
 
+    previous_questions = [
+        message["content"]
+        for message in history
+        if message["role"] == "user" and message.get("content")
+    ]
     if not previous_questions:
         return current
 
-    max_turns = max(1, CHAT_QUERY_REWRITE_MAX_USER_TURNS)
-    user_questions = previous_questions[-max_turns:]
-
-    history_text = "\n".join(
-        f"- {value}"
-        for value in user_questions
-    )
-
-    rewrite_prompt = f"""
-同一チャット内のユーザー質問履歴を踏まえて、現在の質問を
-「それ単独で検索しても対象が分かる質問」に書き換えてください。
-
-重要:
-- このチャットでは話題は継続しています。新しい話題へ切り替わったとは解釈しないでください。
-- 省略された対象名・種族名・技能名・魔法名などを、過去のユーザー質問から補ってください。
-- 過去のAI回答は根拠にしません。
-- ユーザーが述べていないルール事実、数値、効果、名称を新しく追加してはいけません。
-- 元の質問の意図を広げたり、一般論へ置き換えたりしないでください。
-- 出力は書き換え後の質問1文だけにしてください。説明や引用符は不要です。
-
-過去のユーザー質問:
-{history_text}
-
-現在の質問:
-{current}
-""".strip()
-
-    try:
-        rewriter = ChatOpenAI(
-            model_name=CHAT_QUERY_REWRITE_MODEL,
-            temperature=0,
-        )
-        rewritten = str(
-            rewriter.invoke(rewrite_prompt).content or ""
-        ).strip()
-    except Exception as exc:
-        print(
-            "WARNING: chat query rewrite failed; "
-            f"falling back to deterministic context join: {exc}"
-        )
-        rewritten = ""
-
-    if rewritten:
-        rewritten = re.sub(r"^[「『\"']+|[」』\"']+$", "", rewritten).strip()
-        rewritten = rewritten.splitlines()[0].strip()
-
-    if rewritten:
-        return rewritten
-
-    # 書き換え失敗時も同一チャットの主題を失わないフォールバック。
-    return f"{previous_questions[0]}\n{current}"[-1600:]
+    return f"{previous_questions[-1]}\n{current}"[-1600:]
 
 
 # ============================================================
@@ -1132,6 +1069,8 @@ def build_answer_guidance(question: str) -> str:
         "必要十分な範囲で回答してください。"
         "直接的な根拠だけで回答できる場合は、別文脈の資料や重複する資料を"
         "補強目的で追加引用しないでください。"
+        "一覧・列挙を行う場合は、各項目が質問対象に属することを個別に確認し、"
+        "近接する別見出し・別種族・別技能等を混在させないでください。"
         "資料から直接確認できない一般的な説明は、必要ならAI補足として引用なしで記述してください。"
     )
 
@@ -3833,7 +3772,6 @@ def ask_question(
     full_prompt = prompt.format(
         context=context,
         question=question,
-        resolved_question=search_question,
         answer_guidance=build_answer_guidance(search_question),
         conversation_history=conversation_history_text,
     )
