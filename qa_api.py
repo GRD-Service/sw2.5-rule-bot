@@ -105,6 +105,10 @@ CITATION_EXCERPT_CHARS = int(os.getenv("CITATION_EXCERPT_CHARS", "360"))
 # Query expansion
 QUERY_VARIANT_MAX = int(os.getenv("QUERY_VARIANT_MAX", "6"))
 
+# 同一チャットは同じ話題を継続する前提。検索時にも会話文脈を常に継承する。
+CHAT_SEARCH_HISTORY_TURNS = int(os.getenv("CHAT_SEARCH_HISTORY_TURNS", "4"))
+CHAT_SEARCH_CONTEXT_CHARS = int(os.getenv("CHAT_SEARCH_CONTEXT_CHARS", "2400"))
+
 # 表・一覧・チャート検索
 STRUCTURED_MAX_PAGES = int(os.getenv("STRUCTURED_MAX_PAGES", "8"))
 STRUCTURED_PAGES_PER_BOOK = int(os.getenv("STRUCTURED_PAGES_PER_BOOK", "2"))
@@ -824,11 +828,25 @@ template = """
 これまでの会話:
 {conversation_history}
 
+このチャットで継続している主題:
+{chat_topic}
+
+検索時に使用した会話文脈:
+{search_question}
+
 資料:
 {context}
 
-質問:
+現在の質問:
 {question}
+
+会話継続の扱い:
+- 同じチャット内では、現在の質問は上記のチャット主題を継続しているものとして解釈してください。
+- 新しい話題へ切り替わったと推測してはいけません。新しい話題は「新しいチャット」で開始されます。
+- 現在の質問で対象名が省略されている場合、チャット主題と直前までのユーザー質問から対象を補ってください。
+- たとえば主題が「リルドラケンの種族特徴」で現在の質問が「希少種は？」なら、
+  一般的な希少種の定義ではなく「リルドラケンの希少種」について答えてください。
+- 主題の説明を最初から繰り返す必要はありません。現在の質問に直接答えてください。
 """
 
 prompt = PromptTemplate(
@@ -837,6 +855,8 @@ prompt = PromptTemplate(
         "question",
         "answer_guidance",
         "conversation_history",
+        "chat_topic",
+        "search_question",
     ],
     template=template,
 )
@@ -880,31 +900,91 @@ def format_conversation_history(history: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def build_chat_topic(history: list[dict]) -> str:
+    """
+    新しい話題はUIの「新しいチャット」で開始する前提のため、
+    最初のユーザー質問をそのチャットの主題として扱う。
+    """
+    for message in history:
+        if (
+            message.get("role") == "user"
+            and str(message.get("content") or "").strip()
+        ):
+            return str(message.get("content") or "").strip()
+
+    return "（なし）"
+
+
 def build_contextual_search_question(
     question: str,
     history: list[dict],
 ) -> str:
-    """指示語を含む追質問だけ直前のユーザー質問で補う。"""
+    """
+    同一チャットでは、質問文の形にかかわらず会話文脈を検索へ引き継ぐ。
+
+    新しい話題はUIの「新しいチャット」で開始する設計なので、
+    「それ」「その」等を見て追質問かどうかを判定しない。
+
+    検索には、
+    - チャット最初のユーザー質問
+    - 直近のユーザー質問
+    - 現在の質問
+    を使用する。
+    過去のAI回答は検索語に含めない。
+    """
     current = str(question or "").strip()
     if not current:
         return current
 
-    referential_terms = (
-        "それ", "その", "これ", "この", "あれ", "あの",
-        "前述", "上記", "先ほど", "さっき", "場合",
-    )
-    if not any(term in current for term in referential_terms):
-        return current
-
     previous_questions = [
-        message["content"]
+        str(message.get("content") or "").strip()
         for message in history
-        if message["role"] == "user" and message.get("content")
+        if message.get("role") == "user"
+        and str(message.get("content") or "").strip()
     ]
+
     if not previous_questions:
         return current
 
-    return f"{previous_questions[-1]}\n{current}"[-1600:]
+    history_limit = max(1, CHAT_SEARCH_HISTORY_TURNS)
+    first_question = previous_questions[0]
+    recent_questions = previous_questions[-history_limit:]
+
+    parts = [first_question]
+    for previous in recent_questions:
+        if previous not in parts:
+            parts.append(previous)
+    parts.append(current)
+
+    max_chars = max(800, CHAT_SEARCH_CONTEXT_CHARS)
+    joined = "\n".join(parts)
+
+    if len(joined) <= max_chars:
+        return joined
+
+    # 長大化した場合も、チャット主題と現在質問は必ず保持する。
+    fixed_length = len(first_question) + len(current) + 1
+    remaining = max(0, max_chars - fixed_length - 1)
+
+    recent_kept = []
+    for previous in reversed(recent_questions):
+        if previous == first_question:
+            continue
+
+        cost = len(previous) + (1 if recent_kept else 0)
+        if cost > remaining:
+            continue
+
+        recent_kept.append(previous)
+        remaining -= cost
+
+    recent_kept.reverse()
+
+    return "\n".join(
+        [first_question]
+        + recent_kept
+        + [current]
+    )
 
 
 # ============================================================
@@ -3628,6 +3708,9 @@ def ask_question(
     conversation_history_text = format_conversation_history(
         conversation_history
     )
+    chat_topic = build_chat_topic(
+        conversation_history
+    )
     search_question = build_contextual_search_question(
         question,
         conversation_history,
@@ -3774,6 +3857,8 @@ def ask_question(
         question=question,
         answer_guidance=build_answer_guidance(search_question),
         conversation_history=conversation_history_text,
+        chat_topic=chat_topic,
+        search_question=search_question,
     )
 
     llm = ChatOpenAI(model_name=model_name, temperature=0)
