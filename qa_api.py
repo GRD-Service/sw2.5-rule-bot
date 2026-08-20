@@ -105,10 +105,6 @@ CITATION_EXCERPT_CHARS = int(os.getenv("CITATION_EXCERPT_CHARS", "360"))
 # Query expansion
 QUERY_VARIANT_MAX = int(os.getenv("QUERY_VARIANT_MAX", "6"))
 
-# 同一チャットでは同じ話題を掘り下げる前提で、検索時にも会話文脈を継承する。
-CHAT_SEARCH_HISTORY_TURNS = int(os.getenv("CHAT_SEARCH_HISTORY_TURNS", "4"))
-CHAT_SEARCH_CONTEXT_CHARS = int(os.getenv("CHAT_SEARCH_CONTEXT_CHARS", "2400"))
-
 # 表・一覧・チャート検索
 STRUCTURED_MAX_PAGES = int(os.getenv("STRUCTURED_MAX_PAGES", "8"))
 STRUCTURED_PAGES_PER_BOOK = int(os.getenv("STRUCTURED_PAGES_PER_BOOK", "2"))
@@ -822,11 +818,21 @@ template = """
 これまでの会話:
 {conversation_history}
 
+このチャットで継続している主題:
+{chat_topic}
+
 資料:
 {context}
 
-質問:
+現在の質問:
 {question}
+
+回答時の注意:
+- 「現在の質問」は、原則として「このチャットで継続している主題」の続きとして解釈してください。
+- 「現在の質問」だけでは対象が省略されている場合、主題と会話履歴から対象を補ってください。
+- たとえば主題が「リルドラケンの種族特徴」で、現在の質問が「希少種は？」なら、
+  「リルドラケンの希少種」について答えてください。
+- 主題の説明を最初から繰り返す必要はありません。現在の質問に直接答えてください。
 """
 
 prompt = PromptTemplate(
@@ -835,6 +841,7 @@ prompt = PromptTemplate(
         "question",
         "answer_guidance",
         "conversation_history",
+        "chat_topic",
     ],
     template=template,
 )
@@ -878,84 +885,48 @@ def format_conversation_history(history: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def build_chat_topic(history: list[dict]) -> str:
+    """
+    同一チャットの主題を、現在の質問とは別枠で回答プロンプトへ渡す。
+
+    新しい話題はUIの「新しいチャット」で開始する前提のため、
+    原則として最初のユーザー質問をチャット主題として扱う。
+    """
+    for message in history:
+        if (
+            message.get("role") == "user"
+            and str(message.get("content") or "").strip()
+        ):
+            return str(message.get("content") or "").strip()
+
+    return "（なし）"
+
+
 def build_contextual_search_question(
     question: str,
     history: list[dict],
 ) -> str:
-    """
-    同一チャットでは同じ話題を継続して掘り下げる前提で、
-    質問文の形にかかわらず過去のユーザー質問を検索文脈へ引き継ぐ。
-
-    新しい話題はUIの「新しいチャット」で開始する設計のため、
-    「それ」「その」等の指示語による追質問判定は行わない。
-
-    検索語が長くなりすぎないよう、
-    - 最初のユーザー質問（チャットの主題）
-    - 直近のユーザー質問
-    - 現在の質問
-    を使って検索文を構成する。
-    過去のAI回答は検索語には含めない。
-    """
+    """指示語を含む追質問だけ直前のユーザー質問で補う。"""
     current = str(question or "").strip()
     if not current:
         return current
 
-    previous_questions = [
-        str(message.get("content") or "").strip()
-        for message in history
-        if message.get("role") == "user"
-        and str(message.get("content") or "").strip()
-    ]
+    referential_terms = (
+        "それ", "その", "これ", "この", "あれ", "あの",
+        "前述", "上記", "先ほど", "さっき", "場合",
+    )
+    if not any(term in current for term in referential_terms):
+        return current
 
+    previous_questions = [
+        message["content"]
+        for message in history
+        if message["role"] == "user" and message.get("content")
+    ]
     if not previous_questions:
         return current
 
-    history_limit = max(1, CHAT_SEARCH_HISTORY_TURNS)
-
-    selected_questions = []
-
-    # チャット開始時の主題を必ず残す。
-    first_question = previous_questions[0]
-    selected_questions.append(first_question)
-
-    # 直近の質問も取り込み、短い追質問が連続しても主題を失わないようにする。
-    recent_questions = previous_questions[-history_limit:]
-    for previous in recent_questions:
-        if previous not in selected_questions:
-            selected_questions.append(previous)
-
-    parts = selected_questions + [current]
-
-    # 極端に長い質問が続いた場合でも、主題と現在質問を優先して保持する。
-    max_chars = max(800, CHAT_SEARCH_CONTEXT_CHARS)
-    joined = "\n".join(parts)
-
-    if len(joined) <= max_chars:
-        return joined
-
-    # 最初の質問と現在質問を固定し、残り容量に直近履歴を後ろから詰める。
-    fixed_length = len(first_question) + len(current) + 1
-    remaining = max(0, max_chars - fixed_length - 1)
-
-    recent_kept = []
-    for previous in reversed(recent_questions):
-        if previous == first_question:
-            continue
-
-        cost = len(previous) + (1 if recent_kept else 0)
-        if cost > remaining:
-            continue
-
-        recent_kept.append(previous)
-        remaining -= cost
-
-    recent_kept.reverse()
-
-    return "\n".join(
-        [first_question]
-        + recent_kept
-        + [current]
-    )
+    return f"{previous_questions[-1]}\n{current}"[-1600:]
 
 
 # ============================================================
@@ -3677,6 +3648,9 @@ def ask_question(
     conversation_history_text = format_conversation_history(
         conversation_history
     )
+    chat_topic = build_chat_topic(
+        conversation_history
+    )
     search_question = build_contextual_search_question(
         question,
         conversation_history,
@@ -3703,8 +3677,7 @@ def ask_question(
 
     # 回答方式は単一モードへ統合済み。
     # 旧 free_chat / exact_search の分岐は廃止し、常に資料検索 + AI補足で回答する。
-    # 同一チャットでは、最初の質問と直近のユーザー質問を検索文脈へ常に含める。
-    # 新しい話題は「新しいチャット」で開始する前提とし、質問文から追質問かどうかを推測しない。
+    # 掘り下げ時は直近のユーザー質問も検索文脈へ含める。
     # 過去のAI回答は検索語へ混ぜず、回答生成時の会話理解にだけ利用する。
     variants = build_query_variants(search_question)
 
@@ -3824,6 +3797,7 @@ def ask_question(
         question=question,
         answer_guidance=build_answer_guidance(search_question),
         conversation_history=conversation_history_text,
+        chat_topic=chat_topic,
     )
 
     llm = ChatOpenAI(model_name=model_name, temperature=0)
