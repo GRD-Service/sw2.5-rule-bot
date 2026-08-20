@@ -105,6 +105,12 @@ CITATION_EXCERPT_CHARS = int(os.getenv("CITATION_EXCERPT_CHARS", "360"))
 # Query expansion
 QUERY_VARIANT_MAX = int(os.getenv("QUERY_VARIANT_MAX", "6"))
 
+# 同一チャット内の追質問を、検索・回答用の単独質問へ書き換える。
+CHAT_QUERY_REWRITE_MODEL = os.getenv("CHAT_QUERY_REWRITE_MODEL", "gpt-5.4-nano")
+CHAT_QUERY_REWRITE_MAX_USER_TURNS = int(
+    os.getenv("CHAT_QUERY_REWRITE_MAX_USER_TURNS", "6")
+)
+
 # 表・一覧・チャート検索
 STRUCTURED_MAX_PAGES = int(os.getenv("STRUCTURED_MAX_PAGES", "8"))
 STRUCTURED_PAGES_PER_BOOK = int(os.getenv("STRUCTURED_PAGES_PER_BOOK", "2"))
@@ -818,30 +824,28 @@ template = """
 これまでの会話:
 {conversation_history}
 
-このチャットで継続している主題:
-{chat_topic}
-
 資料:
 {context}
 
-現在の質問:
+ユーザーが今回入力した質問:
 {question}
 
+会話文脈を補完した今回の回答対象:
+{resolved_question}
+
 回答時の注意:
-- 「現在の質問」は、原則として「このチャットで継続している主題」の続きとして解釈してください。
-- 「現在の質問」だけでは対象が省略されている場合、主題と会話履歴から対象を補ってください。
-- たとえば主題が「リルドラケンの種族特徴」で、現在の質問が「希少種は？」なら、
-  「リルドラケンの希少種」について答えてください。
-- 主題の説明を最初から繰り返す必要はありません。現在の質問に直接答えてください。
+- 回答対象は「会話文脈を補完した今回の回答対象」です。
+- ユーザーが今回入力した質問だけを一般論として再解釈してはいけません。
+- 過去の話題を最初から説明し直さず、今回の回答対象へ直接答えてください。
 """
 
 prompt = PromptTemplate(
     input_variables=[
         "context",
         "question",
+        "resolved_question",
         "answer_guidance",
         "conversation_history",
-        "chat_topic",
     ],
     template=template,
 )
@@ -885,48 +889,85 @@ def format_conversation_history(history: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def build_chat_topic(history: list[dict]) -> str:
-    """
-    同一チャットの主題を、現在の質問とは別枠で回答プロンプトへ渡す。
-
-    新しい話題はUIの「新しいチャット」で開始する前提のため、
-    原則として最初のユーザー質問をチャット主題として扱う。
-    """
-    for message in history:
-        if (
-            message.get("role") == "user"
-            and str(message.get("content") or "").strip()
-        ):
-            return str(message.get("content") or "").strip()
-
-    return "（なし）"
-
-
 def build_contextual_search_question(
     question: str,
     history: list[dict],
 ) -> str:
-    """指示語を含む追質問だけ直前のユーザー質問で補う。"""
+    """
+    同一チャットの現在質問を、検索と最終回答の双方で使える単独質問へ書き換える。
+
+    設計前提:
+    - 同じチャットは同じ話題の継続。
+    - 新しい話題はUIの「新しいチャット」で開始する。
+    - 質問文の形から「追質問かどうか」は判定しない。
+    - 過去のAI回答は書き換え材料に使わず、ユーザー質問だけを使う。
+    - 新しいルール事実は補わず、省略された対象・主題だけを復元する。
+    """
     current = str(question or "").strip()
     if not current:
         return current
 
-    referential_terms = (
-        "それ", "その", "これ", "この", "あれ", "あの",
-        "前述", "上記", "先ほど", "さっき", "場合",
-    )
-    if not any(term in current for term in referential_terms):
-        return current
-
     previous_questions = [
-        message["content"]
+        str(message.get("content") or "").strip()
         for message in history
-        if message["role"] == "user" and message.get("content")
+        if message.get("role") == "user"
+        and str(message.get("content") or "").strip()
     ]
+
     if not previous_questions:
         return current
 
-    return f"{previous_questions[-1]}\n{current}"[-1600:]
+    max_turns = max(1, CHAT_QUERY_REWRITE_MAX_USER_TURNS)
+    user_questions = previous_questions[-max_turns:]
+
+    history_text = "\n".join(
+        f"- {value}"
+        for value in user_questions
+    )
+
+    rewrite_prompt = f"""
+同一チャット内のユーザー質問履歴を踏まえて、現在の質問を
+「それ単独で検索しても対象が分かる質問」に書き換えてください。
+
+重要:
+- このチャットでは話題は継続しています。新しい話題へ切り替わったとは解釈しないでください。
+- 省略された対象名・種族名・技能名・魔法名などを、過去のユーザー質問から補ってください。
+- 過去のAI回答は根拠にしません。
+- ユーザーが述べていないルール事実、数値、効果、名称を新しく追加してはいけません。
+- 元の質問の意図を広げたり、一般論へ置き換えたりしないでください。
+- 出力は書き換え後の質問1文だけにしてください。説明や引用符は不要です。
+
+過去のユーザー質問:
+{history_text}
+
+現在の質問:
+{current}
+""".strip()
+
+    try:
+        rewriter = ChatOpenAI(
+            model_name=CHAT_QUERY_REWRITE_MODEL,
+            temperature=0,
+        )
+        rewritten = str(
+            rewriter.invoke(rewrite_prompt).content or ""
+        ).strip()
+    except Exception as exc:
+        print(
+            "WARNING: chat query rewrite failed; "
+            f"falling back to deterministic context join: {exc}"
+        )
+        rewritten = ""
+
+    if rewritten:
+        rewritten = re.sub(r"^[「『\"']+|[」』\"']+$", "", rewritten).strip()
+        rewritten = rewritten.splitlines()[0].strip()
+
+    if rewritten:
+        return rewritten
+
+    # 書き換え失敗時も同一チャットの主題を失わないフォールバック。
+    return f"{previous_questions[0]}\n{current}"[-1600:]
 
 
 # ============================================================
@@ -3648,9 +3689,6 @@ def ask_question(
     conversation_history_text = format_conversation_history(
         conversation_history
     )
-    chat_topic = build_chat_topic(
-        conversation_history
-    )
     search_question = build_contextual_search_question(
         question,
         conversation_history,
@@ -3795,9 +3833,9 @@ def ask_question(
     full_prompt = prompt.format(
         context=context,
         question=question,
+        resolved_question=search_question,
         answer_guidance=build_answer_guidance(search_question),
         conversation_history=conversation_history_text,
-        chat_topic=chat_topic,
     )
 
     llm = ChatOpenAI(model_name=model_name, temperature=0)
